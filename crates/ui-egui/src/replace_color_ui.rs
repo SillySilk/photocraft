@@ -96,6 +96,9 @@ pub(crate) fn pick_top(app: &mut PhotocraftApp, at: [f64; 2], mods: egui::Modifi
     {
         f.insert("color".into(), json!(crate::color_picker_ui::hex(rgb)));
     }
+    if let Some(c) = f.get("color").cloned() {
+        f.insert("__sampledColor".into(), c);
+    }
     match app.ui.dialogs.last_mut() {
         Some(d) => {
             d.fields = f;
@@ -126,8 +129,51 @@ fn num(f: &Map<String, Value>, k: &str, d: f32) -> f32 {
     f.get(k).and_then(Value::as_f64).map_or(d, |v| v as f32)
 }
 
+fn rgb_of(f: &Map<String, Value>, k: &str) -> Option<[f32; 3]> {
+    f.get(k).and_then(Value::as_str).and_then(crate::color_picker_ui::parse_hex)
+}
+
+/// Frame-start sync of the Result swatch (`__result`, a hex) with the From `color` and the Hue,
+/// Saturation and Lightness sliders.
+///
+/// * A From colour changed outside the eyedropper (its Color Picker) no longer matches the samples
+///   (`__sampledColor` is the hex `pick_top` last set), so the samples are dropped.
+/// * A `__result` the Color Picker wrote (it differs from `__resultSynced`, the hex this function
+///   last wrote) sets Hue, Saturation and Lightness through `replace_color_shift`. Hue follows the
+///   slider's sign: red to blue is -120. The shift is whole numbers, clamped to the slider ranges,
+///   so `__result` is then rewritten to what the sliders actually give.
+/// * Otherwise `__result` is rewritten to what the sliders give for the current From colour.
+///
+/// `__result`, `__resultSynced` and `__sampledColor` start with `__`, so `params` never sends them.
+pub(crate) fn sync_result(f: &mut Map<String, Value>) {
+    let Some(from) = rgb_of(f, "color") else { return };
+    let color = crate::color_picker_ui::hex(from);
+    match f.get("__sampledColor").and_then(Value::as_str) {
+        Some(sampled) if sampled != color && non_empty(f, "points") => {
+            for k in ["points", "subtractPoints", "order"] {
+                f.insert(k.into(), json!([]));
+            }
+        }
+        _ => {}
+    }
+    f.insert("__sampledColor".into(), json!(color));
+
+    let picked = rgb_of(f, "__result").filter(|_| f.get("__result") != f.get("__resultSynced"));
+    if let Some(result) = picked {
+        // `+ 0.0` turns -0.0 into 0.0.
+        for (k, v) in ["hue", "saturation", "lightness"].into_iter().zip(photocraft_algo::tone::replace_color_shift(from, result)) {
+            f.insert(k.into(), json!(f64::from(v) + 0.0));
+        }
+    }
+    let result =
+        crate::color_picker_ui::hex(photocraft_algo::tone::replace_color_result(from, num(f, "hue", 0.0), num(f, "saturation", 0.0), num(f, "lightness", 0.0)));
+    f.insert("__result".into(), json!(result));
+    f.insert("__resultSynced".into(), json!(result));
+}
+
 /// Dialog body, in Photoshop's order.
 pub(crate) fn body(_app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+    sync_result(f);
     let t = Tokens::get(ui.ctx());
     let localized = f.get("localized").and_then(Value::as_bool).unwrap_or(false);
     let mut on = localized;
@@ -168,7 +214,16 @@ pub(crate) fn body(_app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<Stri
     slider(ui, f, "hue", -180.0..=180.0, 0.0);
     slider(ui, f, "saturation", -100.0..=100.0, 0.0);
     slider(ui, f, "lightness", -100.0..=100.0, 0.0);
-    // The Result row goes here.
+    ui.horizontal(|ui| {
+        let name = tl!("Result");
+        ui.label(egui::RichText::new(name).color(t.text_dim));
+        let rgb = rgb_of(f, "__result").unwrap_or([0.0; 3]);
+        let b = rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        if widgets::color_swatch_button(ui, Color32::from_rgb(b[0], b[1], b[2]), name).clicked() {
+            crate::color_picker_ui::request_field(f, "__result", &crate::color_picker_ui::title_for(name));
+        }
+        ui.label(egui::RichText::new(crate::color_picker_ui::hex(rgb)).color(t.text_dim).monospace());
+    });
     if let Some(mut preview) = f.get("__preview").and_then(Value::as_bool) {
         ui.add_space(4.0);
         widgets::checkbox(ui, &mut preview, tl!("Preview"));
@@ -300,5 +355,76 @@ mod tests {
         assert_eq!(p["points"], json!([[6.0, 2.0]]));
         assert_eq!(p["subtractPoints"], json!([[9.0, 7.0]]));
         assert_eq!(p["hue"], json!(10));
+    }
+
+    #[test]
+    fn result_swatch_tracks_sliders() {
+        let mut app = app_with_doc();
+        let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
+        pick_top(&mut app, [5.0, 5.0], egui::Modifiers::NONE);
+        let f = &mut app.ui.dialog_mut(id).unwrap().fields;
+        f.insert("hue".into(), json!(120));
+        sync_result(f);
+        assert_eq!(f["__result"], json!("#00ff00"));
+    }
+
+    /// Hue convention: the shift from red to blue is -120 (replace_color_shift's sign).
+    #[test]
+    fn picking_a_result_sets_hue_saturation_lightness() {
+        let mut app = app_with_doc();
+        let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
+        pick_top(&mut app, [5.0, 5.0], egui::Modifiers::NONE);
+        let f = &mut app.ui.dialog_mut(id).unwrap().fields;
+        sync_result(f);
+        assert_eq!(f["__result"], json!("#ff0000"));
+        f.insert("__result".into(), json!("#0000ff"));
+        sync_result(f);
+        assert_eq!(f["hue"].as_f64(), Some(-120.0));
+        assert_eq!(f["saturation"].as_f64(), Some(0.0));
+        assert_eq!(f["lightness"].as_f64(), Some(0.0));
+        assert_eq!(f["__result"], json!("#0000ff"));
+    }
+
+    /// A new sample moves From colour, which must not be read as the user picking a new Result.
+    #[test]
+    fn resampling_keeps_the_shift_and_updates_the_result() {
+        let mut app = app_with_doc();
+        let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
+        pick_top(&mut app, [5.0, 5.0], egui::Modifiers::NONE);
+        app.ui.dialog_mut(id).unwrap().fields.insert("hue".into(), json!(120));
+        sync_result(&mut app.ui.dialog_mut(id).unwrap().fields);
+        pick_top(&mut app, [25.0, 5.0], egui::Modifiers::NONE);
+        let f = &mut app.ui.dialog_mut(id).unwrap().fields;
+        sync_result(f);
+        assert_eq!(f["hue"].as_f64(), Some(120.0));
+        assert_eq!(f["points"], json!([[25.0, 5.0]]), "an eyedropper sample is not cleared");
+        assert_ne!(f["__result"], json!("#00ff00"));
+    }
+
+    #[test]
+    fn picking_from_colour_clears_samples() {
+        let mut app = app_with_doc();
+        let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
+        pick_top(&mut app, [5.0, 5.0], egui::Modifiers::NONE);
+        let f = &mut app.ui.dialog_mut(id).unwrap().fields;
+        f.insert("color".into(), json!("#00ff00"));
+        sync_result(f);
+        assert_eq!(f["points"], json!([]));
+        assert_eq!(f["subtractPoints"], json!([]));
+        assert_eq!(f["order"], json!([]));
+    }
+
+    /// `__result` and the sync bookkeeping never reach the engine, and OK still runs.
+    #[test]
+    fn result_never_reaches_the_engine() {
+        let mut app = app_with_doc();
+        let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
+        pick_top(&mut app, [5.0, 5.0], egui::Modifiers::NONE);
+        let f = &mut app.ui.dialog_mut(id).unwrap().fields;
+        sync_result(f);
+        assert!(f.contains_key("__result"));
+        let p = crate::filter_dialog::params_of(f);
+        assert!(p.as_object().unwrap().keys().all(|k| !k.starts_with("__")), "{p}");
+        crate::dialogs::confirm(&mut app, id).unwrap();
     }
 }
