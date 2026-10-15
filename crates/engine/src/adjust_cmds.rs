@@ -341,8 +341,6 @@ fn replace_color(s: &mut Session, p: &Value) -> Result<Value> {
     let mut q = p.clone();
     if let Some(o) = q.as_object_mut() {
         o.insert("fuzziness".into(), json!(num(p, "fuzziness", 40.0).clamp(0.0, 200.0)));
-        o.remove("mode");
-        o.remove("invert");
     }
     let samples = crate::selection_cmds::ColorRangeSamples::new_for(s, &q, CMD)?;
     let area = s.active().ok_or(EngineError::NoDocument)?.doc.bounds();

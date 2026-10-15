@@ -679,25 +679,59 @@ fn history_len(s: &Session) -> usize {
     s.active().unwrap().history.past_len()
 }
 
+/// 40×10 RGB: bright red, mid red, dark red, white in four 10-px bands.
+fn three_reds_doc() -> Session {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 40, "height": 10, "depth": 8, "mode": "rgb"})).unwrap();
+    paint(&mut s, |x, _| match x / 10 {
+        0 => [1.0, 0.0, 0.0, 1.0],
+        1 => [217.0 / 255.0, 0.0, 0.0, 1.0],
+        2 => [180.0 / 255.0, 0.0, 0.0, 1.0],
+        _ => [1.0, 1.0, 1.0, 1.0],
+    });
+    s
+}
+
+/// Green channel of (bright, mid, dark) red after the shift.
+fn greens(s: &Session) -> [f32; 3] {
+    [rgba(s, 5, 5)[1], rgba(s, 15, 5)[1], rgba(s, 25, 5)[1]]
+}
+
 #[test]
 fn replace_color_subtract_point_excludes_a_shade() {
-    // Sample the bright red, then subtract the dark red: only bright red shifts. (Photoshop's
-    // subtract pulls the matching box's edge in towards the subtracted colour, so it must lie
-    // outside the box; subtracting a colour that is itself a box edge leaves it ~92 % selected.)
-    let mut s = red_shades_doc();
-    s.execute("image.adjustments.replaceColor", json!({"points": [[5, 5]], "subtractPoints": [[15, 5]], "order": ["+", "-"], "fuzziness": 40, "hue": 120}))
-        .unwrap();
-    assert!(rgba(&s, 5, 5)[1] > 0.5, "bright red turned green");
-    assert!(rgba(&s, 15, 5)[1] < 0.1, "dark red left alone {:?}", rgba(&s, 15, 5));
-    assert_eq!(rgba(&s, 25, 5), [0.0, 0.0, 1.0, 1.0]);
+    // Bright and dark red span the match; subtracting the mid red between them pulls the nearer
+    // edge onto it, so one end drops out. Control: without the subtract all three shift.
+    let run = |extra: Value| {
+        let mut s = three_reds_doc();
+        let mut p = json!({"points": [[5, 5], [25, 5]], "fuzziness": 10, "hue": 120});
+        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        s.execute("image.adjustments.replaceColor", p).unwrap();
+        s
+    };
+    let control = greens(&run(json!({"order": ["+", "+"]})));
+    let sub = greens(&run(json!({"subtractPoints": [[15, 5]], "order": ["+", "+", "-"]})));
+    eprintln!("control {control:?} subtract {sub:?}");
+    assert!(control.iter().all(|g| *g > 0.5), "control shifts every shade: {control:?}");
+    assert!(sub[1] > 0.5, "the subtracted shade stays selected at the new edge: {sub:?}");
+    assert!(sub[0].min(sub[2]) < control[0].min(control[2]) - 0.3, "subtract drops one end: {sub:?} vs {control:?}");
+    assert_eq!(rgba(&run(json!({})), 35, 5), [1.0, 1.0, 1.0, 1.0], "white untouched");
 }
 
 #[test]
 fn subtract_before_sample_narrows_from_colour() {
-    let mut s = red_shades_doc();
-    s.execute("image.adjustments.replaceColor", json!({"color": "#ff0000", "subtractPoints": [[15, 5]], "fuzziness": 200, "hue": 120})).unwrap();
-    assert!(rgba(&s, 5, 5)[1] > 0.5);
-    assert!(rgba(&s, 15, 5)[1] < rgba(&s, 5, 5)[1]);
+    // No eyedropper points: the colours span the match and the subtract narrows it.
+    let run = |extra: Value| {
+        let mut s = three_reds_doc();
+        let mut p = json!({"colors": ["#ff0000", "#b40000"], "fuzziness": 10, "hue": 120});
+        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        s.execute("image.adjustments.replaceColor", p).unwrap();
+        greens(&s)
+    };
+    let control = run(json!({}));
+    let sub = run(json!({"subtractPoints": [[15, 5]]}));
+    eprintln!("control {control:?} subtract {sub:?}");
+    assert!(control.iter().all(|g| *g > 0.5), "{control:?}");
+    assert!(sub[0].min(sub[2]) < control[0].min(control[2]) - 0.3, "subtract narrows: {sub:?} vs {control:?}");
 }
 
 #[test]
