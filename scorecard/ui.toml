@@ -165,3 +165,10 @@ target = "Layer clipboard: copy/paste whole layers (masks, styles, type) between
 status = "partial"
 issue = 217
 note = "layer.copyToDocument copies layers into another open document keeping names, content, masks, styles and blending, converting to the destination's profile and depth, as one history step (layer_copy_cmds.rs, #589). It is the command a drag between documents dispatches; there is still no copy/paste layer clipboard"
+
+[[item]]
+id = "UI-217-24"
+target = "Image › Adjustments › Replace Color dialog as Photoshop's: eyedroppers (sample/add/subtract, armed on open), Selection/Image preview, Result swatch"
+status = "partial"
+issue = 217
+note = "replace_color_ui.rs (#6260; #6278 Result swatch, #6279 armed on open, #6280 add/subtract, #6281 preview): Sample / Add / Subtract eyedroppers armed on open, canvas and thumbnail clicks with Shift add and Alt subtract; Selection / Image thumbnail from color_range_ui's mask; Result swatch opens the Color Picker and sets Hue/Saturation/Lightness (algo tone.rs replace_color_shift). Matching is select.colorRange's Lab query (selection_cmds.rs ColorRangeSamples). Missing: Presets, Load… and Save… (.axt) (#6282)"
