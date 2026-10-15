@@ -401,7 +401,7 @@ fn radio(ui: &mut egui::Ui, on: bool, label: &str) -> egui::Response {
 }
 
 /// Eyedropper button: the pipette icon with a +/− badge; labelled for accessibility.
-fn eyedropper(ui: &mut egui::Ui, badge: &str, selected: bool, label: &str) -> egui::Response {
+pub(crate) fn eyedropper(ui: &mut egui::Ui, badge: &str, selected: bool, label: &str) -> egui::Response {
     let t = Tokens::get(ui.ctx());
     let r = crate::icons::button(ui, "pipette", 26.0, selected, label);
     if !badge.is_empty() {
@@ -494,7 +494,7 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
                     ((p.x - img_rect.left()) / scale).floor().max(0.0) as f64 * f64::from(k) + f64::from(k / 2),
                     ((p.y - img_rect.top()) / scale).floor().max(0.0) as f64 * f64::from(k) + f64::from(k / 2),
                 ];
-                pick(app, f, at, ui.input(|i| i.modifiers));
+                pick(app, f, at, ui.input(|i| i.modifiers), "__order");
             }
         }
         // A preview that can't be drawn says why (#145) instead of staying blank.
@@ -649,7 +649,7 @@ pub fn pick_top(app: &mut PhotocraftApp, at: [f64; 2], mods: egui::Modifiers) ->
     if !at[0].is_finite() || !at[1].is_finite() || at[0] < 0.0 || at[1] < 0.0 || at[0] >= f64::from(doc.size.width) || at[1] >= f64::from(doc.size.height) {
         return false;
     }
-    pick(app, &mut f, at, mods);
+    pick(app, &mut f, at, mods, "__order");
     match app.ui.dialogs.last_mut() {
         Some(d) => {
             d.fields = f;
@@ -659,19 +659,29 @@ pub fn pick_top(app: &mut PhotocraftApp, at: [f64; 2], mods: egui::Modifiers) ->
     }
 }
 
-/// The canvas under an open Color Range dialog is its eyedropper (Photoshop): the pointer `over`
-/// shows the dialog's eyedropper (+ / − while Shift / Alt add or subtract), and a press at document
-/// point `press` takes a sample. False when Color Range isn't the top dialog.
-pub fn canvas_eyedropper(app: &mut PhotocraftApp, ctx: &egui::Context, over: egui::Pos2, press: Option<[f64; 2]>) -> bool {
-    let Some(f) = sampling_top(app) else { return false };
-    let mods = ctx.input(|i| i.modifiers);
-    let tool = if mods.shift {
+/// The eyedropper in use: Shift adds and Alt subtracts whatever tool is selected (`__tool`).
+pub(crate) fn tool_of(f: &Map<String, Value>, mods: egui::Modifiers) -> &str {
+    if mods.shift {
         "add"
     } else if mods.alt {
         "subtract"
     } else {
-        s(&f, "__tool", "sample")
-    };
+        s(f, "__tool", "sample")
+    }
+}
+
+/// The +/− beside the cursor for a tool from [`tool_of`].
+pub(crate) fn tool_badge(tool: &str) -> &'static str {
+    match tool {
+        "add" => "+",
+        "subtract" => "−",
+        _ => "",
+    }
+}
+
+/// The eyedropper cursor over the image for a dialog whose canvas samples colours: the pipette (or
+/// a crosshair, per Preferences), with a +/− `tool_badge` beside it while adding or subtracting.
+pub(crate) fn eyedropper_cursor(app: &PhotocraftApp, ctx: &egui::Context, over: egui::Pos2, tool_badge: &str) {
     if app.session.prefs().cursors.other == photocraft_engine::prefs::OtherCursor::Precise {
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
     } else {
@@ -679,17 +689,21 @@ pub fn canvas_eyedropper(app: &mut PhotocraftApp, ctx: &egui::Context, over: egu
         crate::icons::cursor(ctx, "pipette", over, vec2(2.0, 22.0) / 24.0, 20.0);
         ctx.set_cursor_icon(egui::CursorIcon::None);
     }
-    let badge = match tool {
-        "add" => "+",
-        "subtract" => "−",
-        _ => "",
-    };
-    if !badge.is_empty() {
+    if !tool_badge.is_empty() {
         let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("pc-color-range-badge")));
         let at = over + vec2(20.0, -4.0);
-        p.text(at + vec2(1.0, 1.0), egui::Align2::CENTER_CENTER, badge, crate::theme::semibold(13.0), Color32::from_black_alpha(200));
-        p.text(at, egui::Align2::CENTER_CENTER, badge, crate::theme::semibold(13.0), Color32::WHITE);
+        p.text(at + vec2(1.0, 1.0), egui::Align2::CENTER_CENTER, tool_badge, crate::theme::semibold(13.0), Color32::from_black_alpha(200));
+        p.text(at, egui::Align2::CENTER_CENTER, tool_badge, crate::theme::semibold(13.0), Color32::WHITE);
     }
+}
+
+/// The canvas under an open Color Range dialog is its eyedropper (Photoshop): the pointer `over`
+/// shows the dialog's eyedropper (+ / − while Shift / Alt add or subtract), and a press at document
+/// point `press` takes a sample. False when Color Range isn't the top dialog.
+pub fn canvas_eyedropper(app: &mut PhotocraftApp, ctx: &egui::Context, over: egui::Pos2, press: Option<[f64; 2]>) -> bool {
+    let Some(f) = sampling_top(app) else { return false };
+    let mods = ctx.input(|i| i.modifiers);
+    eyedropper_cursor(app, ctx, over, tool_badge(tool_of(&f, mods)));
     if let Some(at) = press
         && pick_top(app, at, mods)
     {
@@ -699,21 +713,16 @@ pub fn canvas_eyedropper(app: &mut PhotocraftApp, ctx: &egui::Context, over: egu
 }
 
 /// An eyedropper click at document pixel `at`: the plain eyedropper replaces the samples, the
-/// + one (or Shift) adds one, the − one (or Alt) subtracts one.
-pub fn pick(app: &PhotocraftApp, f: &mut Map<String, Value>, at: [f64; 2], mods: egui::Modifiers) {
+/// add one (or Shift) adds one, the subtract one (or Alt) subtracts one. The tool is `__tool`.
+/// The click order is kept under `order_key` (Color Range: `__order`; Replace Color: `order`).
+pub(crate) fn pick(app: &PhotocraftApp, f: &mut Map<String, Value>, at: [f64; 2], mods: egui::Modifiers, order_key: &str) {
     let Some(st) = app.session.active() else { return };
     let (w, h) = (f64::from(st.doc.size.width.max(1)), f64::from(st.doc.size.height.max(1)));
     let [x, y] = at;
     let at = [x.floor().clamp(0.0, w - 1.0), y.floor().clamp(0.0, h - 1.0)];
-    let tool = if mods.shift {
-        "add"
-    } else if mods.alt {
-        "subtract"
-    } else {
-        s(f, "__tool", "sample")
-    };
+    let tool = tool_of(f, mods);
     // The click order matters: Photoshop applies additions and subtractions one after another.
-    let mut order: Vec<Value> = f.get("__order").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut order: Vec<Value> = f.get(order_key).and_then(Value::as_array).cloned().unwrap_or_default();
     match tool {
         "add" => {
             let mut p = points(f, "points");
@@ -733,7 +742,7 @@ pub fn pick(app: &PhotocraftApp, f: &mut Map<String, Value>, at: [f64; 2], mods:
             order = vec![json!("+")];
         }
     }
-    f.insert("__order".into(), Value::Array(order));
+    f.insert(order_key.into(), Value::Array(order));
 }
 
 /// The click order for the command (`order`), when it is consistent with the point lists.
@@ -1122,10 +1131,10 @@ mod tests {
         let mut app = app_with_doc();
         let id = open(&mut app);
         let mut f = app.ui.dialog_mut(id).unwrap().fields.clone();
-        pick(&app, &mut f, [2.0, 2.0], egui::Modifiers::NONE);
-        pick(&app, &mut f, [30.0, 2.0], egui::Modifiers::SHIFT);
-        pick(&app, &mut f, [30.0, 2.0], egui::Modifiers::ALT);
-        pick(&app, &mut f, [30.0, 2.0], egui::Modifiers::ALT);
+        pick(&app, &mut f, [2.0, 2.0], egui::Modifiers::NONE, "__order");
+        pick(&app, &mut f, [30.0, 2.0], egui::Modifiers::SHIFT, "__order");
+        pick(&app, &mut f, [30.0, 2.0], egui::Modifiers::ALT, "__order");
+        pick(&app, &mut f, [30.0, 2.0], egui::Modifiers::ALT, "__order");
         assert_eq!(params(&f)["order"], json!(["+", "+", "-", "-"]));
     }
 
@@ -1183,7 +1192,7 @@ mod tests {
         let mut app = PhotocraftApp::new(session, crate::Services::default());
         let id = open(&mut app);
         let mut fields = app.ui.dialog_mut(id).unwrap().fields.clone();
-        pick(&app, &mut fields, [101.0, 1.0], egui::Modifiers::NONE);
+        pick(&app, &mut fields, [101.0, 1.0], egui::Modifiers::NONE, "__order");
         fields.insert("fuzziness".into(), json!(0.0));
         let original = app.session.active().unwrap().doc.clone();
         let proxy = crate::proxy::proxy_document(&original, 2);
@@ -1235,9 +1244,9 @@ mod tests {
         // Localized needs a picked point.
         f.insert("localized".into(), json!(true));
         assert!(params(&f).get("localized").is_none());
-        pick(&app, &mut f, [3.0, 4.0], egui::Modifiers::NONE);
-        pick(&app, &mut f, [99.0, -4.0], egui::Modifiers::SHIFT);
-        pick(&app, &mut f, [1.0, 1.0], egui::Modifiers::ALT);
+        pick(&app, &mut f, [3.0, 4.0], egui::Modifiers::NONE, "__order");
+        pick(&app, &mut f, [99.0, -4.0], egui::Modifiers::SHIFT, "__order");
+        pick(&app, &mut f, [1.0, 1.0], egui::Modifiers::ALT, "__order");
         assert_eq!(
             params(&f),
             json!({"select": "sampledColors", "invert": false, "fuzziness": 40.0, "points": [[3.0, 4.0], [39.0, 0.0]], "subtractPoints": [[1.0, 1.0]], "order": ["+", "+", "-"], "localized": true, "range": 100.0})

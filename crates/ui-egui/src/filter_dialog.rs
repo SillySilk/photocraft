@@ -369,6 +369,9 @@ fn default_value(app: &PhotocraftApp, command: &str, p: &Param) -> Option<Value>
 
 /// Command-specific open defaults (ruler straighten, warp from layer, …), not remembered prefs.
 fn apply_command_defaults(app: &PhotocraftApp, command: &str, fields: &mut Map<String, Value>) {
+    if command == REPLACE_COLOR {
+        crate::replace_color_ui::defaults(fields);
+    }
     if command == "image.rotation.arbitrary" {
         straighten_defaults(app, fields);
     }
@@ -603,39 +606,7 @@ fn uses_angle_dial(command: &str, key: &str) -> bool {
     key == "angle" && ANGLE_DIAL.contains(&command)
 }
 
-/// Replace Color (#4143): the dialog's "From" colour, sampled from the image with a canvas
-/// eyedropper like Photoshop's. While armed, the next click on the image writes the merged
-/// composite colour into the `color` field (the same sampler the Color Picker uses).
-const REPLACE_COLOR: &str = "image.adjustments.replaceColor";
-const COLOR_EYEDROPPER: &str = "__colorEyedropper";
-
-fn color_eyedropper_owns(f: &Map<String, Value>) -> bool {
-    f.get("__filter").and_then(Value::as_bool) == Some(true)
-        && f.get("__command").and_then(Value::as_str) == Some(REPLACE_COLOR)
-        && f.get(COLOR_EYEDROPPER).and_then(Value::as_bool) == Some(true)
-}
-
-/// Whether the top dialog is a Replace Color with its canvas eyedropper armed.
-pub(crate) fn color_eyedropper_armed(app: &PhotocraftApp) -> bool {
-    app.ui.dialogs.last().is_some_and(|d| color_eyedropper_owns(&d.fields))
-}
-
-/// Sample the merged image at document point (x, y) into the armed dialog's "From" colour.
-/// Returns true when the click was consumed, even off-image or over transparency, where nothing
-/// changes and the eyedropper stays armed (like the Curves picker).
-pub(crate) fn color_eyedropper_sample(app: &mut PhotocraftApp, x: f64, y: f64) -> bool {
-    let Some(id) = app.ui.dialogs.last().filter(|d| color_eyedropper_owns(&d.fields)).map(|d| d.id) else {
-        return false;
-    };
-    if let Some(rgb) = crate::canvas::composite_color(app, x, y)
-        && let Some(d) = app.ui.dialog_mut(id)
-    {
-        d.fields.insert("color".into(), json!(crate::color_picker_ui::hex(rgb)));
-        // Where it was picked: Localized Color Clusters match the colour near this point (#4457).
-        d.fields.insert("points".into(), json!([[x.floor(), y.floor()]]));
-    }
-    true
-}
+const REPLACE_COLOR: &str = crate::replace_color_ui::COMMAND;
 
 /// Dialog body for filter commands.
 pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
@@ -662,8 +633,6 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                     f.insert(p.key, json!(count));
                     continue;
                 }
-                // Replace Color's Range only applies with Localized Color Clusters on, as in Photoshop.
-                let enabled = !(cmd == REPLACE_COLOR && p.key == "range") || f.get("localized").and_then(Value::as_bool) == Some(true);
                 let unit = if is_pixel_param_of(&cmd, &p.key) {
                     "px"
                 } else if p.key == "angle" {
@@ -674,9 +643,6 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                     ""
                 };
                 ui.scope(|ui| {
-                    if !enabled {
-                        ui.disable();
-                    }
                     if uses_angle_dial(&cmd, &p.key) {
                         crate::widgets::angle_dial_row(ui, &label(&p.key), &mut v, min..=max);
                         ui.add_space(4.0);
@@ -792,18 +758,11 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                 let bytes = rgb.map(q);
                 let name = label(&p.key);
                 let mut clicked = false;
-                let eyedropper = cmd == REPLACE_COLOR && p.key == "color";
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(&name).color(t.text_dim));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // PhotoCraft's Color Picker, as everywhere else (#2144).
                         clicked = crate::widgets::color_swatch_button(ui, egui::Color32::from_rgb(bytes[0], bytes[1], bytes[2]), &name).clicked();
-                        if eyedropper {
-                            let armed = f.get(COLOR_EYEDROPPER).and_then(Value::as_bool).unwrap_or(false);
-                            if crate::icons::button(ui, "pipette", 24.0, armed, "Pick Color From Image").clicked() {
-                                f.insert(COLOR_EYEDROPPER.into(), json!(!armed));
-                            }
-                        }
                         ui.label(egui::RichText::new(crate::color_picker_ui::hex(rgb)).color(t.text_dim).monospace());
                     });
                 });
@@ -855,6 +814,10 @@ fn random_seed(entropy: u64, current: i64) -> i64 {
 
 /// User-facing params (strip the dialog's private `__` keys).
 pub fn params_of(f: &Map<String, Value>) -> Value {
+    // Replace Color never sends Localized Color Clusters without a sample (the engine refuses it).
+    if crate::replace_color_ui::owns(f) {
+        return crate::replace_color_ui::params(f);
+    }
     // A document picker left at "None" (-1) means "not given".
     let unset = |k: &str, v: &Value| k == "mapDocument" && v.as_i64() == Some(-1);
     Value::Object(f.iter().filter(|(k, v)| !k.starts_with("__") && !unset(k, v)).map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -934,6 +897,10 @@ pub(crate) fn preview_document_for_target(
     // Blur Gallery pins carry their blur in document pixels too.
     if command.starts_with("filter.blurGallery.") {
         crate::blur_pins::scale_for_proxy(&mut p, run_k);
+    }
+    // Replace Color's eyedropper samples are document pixels; the reduced copy is 1/k the size.
+    if command == REPLACE_COLOR {
+        crate::replace_color_ui::scale_samples_for_proxy(&mut p, &s, run_k);
     }
     s.execute(command, p).ok()?;
     s.active().map(|d| crate::proxy::proxy_document(&d.doc, reduce_k))
@@ -2336,35 +2303,34 @@ mod tests {
     }
 
     /// #4143: Replace Color shows the From colour (defaulting to the foreground) and its canvas
-    /// eyedropper samples the merged image into the dialog.
+    /// eyedropper, armed from the start, samples the merged image into the dialog.
     #[test]
     fn replace_color_eyedropper_samples_the_image() {
+        use crate::replace_color_ui::{pick_top, sampling_top};
         let mut s = photocraft_engine::Session::new();
         s.execute("file.new", json!({"width": 16, "height": 16, "background": "#00ff00"})).unwrap();
         let mut app = PhotocraftApp::new(s, crate::Services::default());
         app.run("tools.setColors", json!({"foreground": "#ff0000"})).unwrap();
         let id = open(&mut app, REPLACE_COLOR).unwrap();
         assert_eq!(app.ui.dialogs.last().unwrap().fields["color"], json!("#ff0000"), "the dialog starts from the foreground colour");
-        assert!(!color_eyedropper_armed(&app));
-        app.ui.dialog_mut(id).unwrap().fields.insert(COLOR_EYEDROPPER.into(), json!(true));
-        assert!(color_eyedropper_armed(&app));
-        assert!(color_eyedropper_sample(&mut app, 4.0, 4.0));
+        assert!(sampling_top(&app), "armed as soon as the dialog opens");
+        assert!(pick_top(&mut app, [4.0, 4.0], egui::Modifiers::NONE));
         assert_eq!(app.ui.dialogs.last().unwrap().fields["color"], json!("#00ff00"));
         // #4457: where it was picked, for Localized Color Clusters.
         assert_eq!(app.ui.dialogs.last().unwrap().fields["points"], json!([[4.0, 4.0]]));
-        // Off-image: the click is consumed, nothing changes and the eyedropper stays armed.
-        assert!(color_eyedropper_sample(&mut app, -1.0, 4.0));
+        // Off-image: nothing changes and the eyedropper stays armed.
+        assert!(!pick_top(&mut app, [-1.0, 4.0], egui::Modifiers::NONE));
         assert_eq!(app.ui.dialogs.last().unwrap().fields["color"], json!("#00ff00"));
-        assert!(color_eyedropper_armed(&app));
-        // Disarmed, the dialog never claims the click.
-        app.ui.dialog_mut(id).unwrap().fields.insert(COLOR_EYEDROPPER.into(), json!(false));
-        assert!(!color_eyedropper_armed(&app));
-        assert!(!color_eyedropper_sample(&mut app, 4.0, 4.0));
+        assert!(sampling_top(&app));
+        // Closed, the dialog never claims a click.
+        crate::dialogs::cancel(&mut app, id).unwrap();
+        assert!(!sampling_top(&app));
+        assert!(!pick_top(&mut app, [4.0, 4.0], egui::Modifiers::NONE));
     }
 
-    /// #4143: the eyedropper button arms and disarms the canvas picker.
+    /// #4143: the three eyedropper buttons choose the tool the canvas picks with.
     #[test]
-    fn replace_color_dialog_arms_the_eyedropper_button() {
+    fn replace_color_dialog_eyedropper_buttons_choose_the_tool() {
         use egui_kittest::Harness;
         use egui_kittest::kittest::Queryable;
 
@@ -2375,12 +2341,17 @@ mod tests {
         PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
         open(h.state_mut(), REPLACE_COLOR).unwrap();
         h.run_steps(3);
-        h.get_by_label("Pick Color From Image").click();
+        let tool = |h: &Harness<'_, &mut PhotocraftApp>| h.state().ui.dialogs.last().unwrap().fields["__tool"].clone();
+        assert_eq!(tool(&h), json!("sample"));
+        h.get_by_label("Add to Sample").click();
         h.run_steps(2);
-        assert!(color_eyedropper_armed(h.state()));
-        h.get_by_label("Pick Color From Image").click();
+        assert_eq!(tool(&h), json!("add"));
+        h.get_by_label("Subtract from Sample").click();
         h.run_steps(2);
-        assert!(!color_eyedropper_armed(h.state()));
+        assert_eq!(tool(&h), json!("subtract"));
+        h.get_by_label("Eyedropper Tool").click();
+        h.run_steps(2);
+        assert_eq!(tool(&h), json!("sample"));
     }
 
     /// #4457: Localized Color Clusters and its Range, as in Photoshop's dialog; the sampled point
@@ -2399,8 +2370,8 @@ mod tests {
         let id = open(h.state_mut(), REPLACE_COLOR).unwrap();
         h.run_steps(3);
         let _ = h.get_by_label("Localized Color Clusters");
-        h.state_mut().ui.dialog_mut(id).unwrap().fields.insert(COLOR_EYEDROPPER.into(), json!(true));
-        assert!(color_eyedropper_sample(h.state_mut(), 2.0, 5.0));
+        let _ = id;
+        assert!(crate::replace_color_ui::pick_top(h.state_mut(), [2.0, 5.0], egui::Modifiers::NONE));
         h.get_by_label("Localized Color Clusters").click();
         h.run_steps(2);
         let f = h.state().ui.dialogs.last().unwrap().fields.clone();

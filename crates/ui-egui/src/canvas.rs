@@ -3303,7 +3303,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         // and the middle button still pan. Curves and Replace Color use the same merged-composite
         // sampler as the Color Picker, never the reduced adjustment preview.
         let curves_picking = crate::adjust_dialog::picker_armed(app);
-        let replace_picking = crate::filter_dialog::color_eyedropper_armed(app);
+        let replace_picking = primary && crate::replace_color_ui::sampling_top(app);
         let picking = primary && (crate::color_picker_ui::top(app).is_some() || curves_picking || replace_picking);
         let range_picking =
             primary && app.ui.dialogs.last().is_some_and(|d| crate::color_range_ui::owns(&d.fields) && crate::color_range_ui::controls(&d.fields).sampling);
@@ -3332,6 +3332,10 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
                     crate::layer_style::drag_shadow(&mut d.fields, start, [f64::from(total.x), f64::from(total.y)]);
                 }
             }
+        } else if replace_picking && let Some(p) = crate::dialogs::free_pointer_over(&ctx, rect) {
+            // Replace Color: the image is its three eyedroppers (Shift adds, Alt subtracts).
+            let press = crate::dialogs::free_press(&ctx, rect).map(|q| xf.to_doc(q));
+            crate::replace_color_ui::canvas(app, &ctx, p, press);
         } else if picking && let Some(p) = crate::dialogs::free_pointer_over(&ctx, rect) {
             if app.session.prefs().cursors.other == photocraft_engine::prefs::OtherCursor::Precise {
                 ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -3342,8 +3346,6 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
                 let d = xf.to_doc(p);
                 if curves_picking {
                     crate::adjust_dialog::sample_at(app, d[0], d[1]);
-                } else if replace_picking {
-                    crate::filter_dialog::color_eyedropper_sample(app, d[0], d[1]);
                 } else {
                     crate::color_picker_ui::sample_at(app, d[0], d[1]);
                 }

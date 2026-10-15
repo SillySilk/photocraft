@@ -171,6 +171,7 @@ pub mod proxy;
 pub mod puppet_ui;
 pub mod quick_pick;
 pub mod rasterize_prompt;
+pub mod replace_color_ui;
 pub mod retouch_ui;
 mod rgb_histogram;
 pub mod rotate_view;
