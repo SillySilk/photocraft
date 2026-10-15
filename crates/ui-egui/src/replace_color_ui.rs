@@ -21,9 +21,11 @@ pub(crate) fn owns(f: &Map<String, Value>) -> bool {
     f.get("__filter").and_then(Value::as_bool) == Some(true) && f.get("__command").and_then(Value::as_str) == Some(COMMAND)
 }
 
-/// Open (and Alt+Reset) state: the plain eyedropper armed, no samples yet.
+/// Open (and Alt+Reset) state: the plain eyedropper armed, the thumbnail showing the Selection,
+/// no samples yet.
 pub(crate) fn defaults(f: &mut Map<String, Value>) {
     f.insert("__tool".into(), json!("sample"));
+    f.insert("__view".into(), json!("selection"));
     f.insert("points".into(), json!([]));
     f.insert("subtractPoints".into(), json!([]));
     f.insert("order".into(), json!([]));
@@ -51,23 +53,21 @@ pub(crate) fn params(f: &Map<String, Value>) -> Value {
     Value::Object(p)
 }
 
-/// The live preview runs on a copy reduced by `k`: bring the eyedropper samples (document pixels)
-/// to the pixel of the copy that covers them, as Color Range's preview does.
-pub(crate) fn scale_samples_for_proxy(p: &mut Value, s: &photocraft_engine::Session, k: u32) {
-    let Some(area) = s.active().map(|st| st.doc.bounds()) else { return };
-    let (w, h) = (f64::from(area.width().max(1)), f64::from(area.height().max(1)));
-    let Some(o) = p.as_object_mut() else { return };
-    for key in ["points", "subtractPoints"] {
-        let Some(Value::Array(a)) = o.get_mut(key) else { continue };
-        for v in a.iter_mut() {
-            if let Some([x, y]) = v.as_array().map(Vec::as_slice).and_then(|s| match s {
-                [x, y] => Some([x.as_f64()?, y.as_f64()?]),
-                _ => None,
-            }) {
-                *v = json!([(x / f64::from(k)).floor().clamp(0.0, w - 1.0), (y / f64::from(k)).floor().clamp(0.0, h - 1.0)]);
-            }
+/// The `select.colorRange` params that match what Replace Color changes: the thumbnail asks
+/// Color Range's own preview for this mask. Same samples and Fuzziness as the command (which clamps
+/// Fuzziness to 0..=200 and has no Sample All Layers, so it reads the merged composite, R2);
+/// Localized Color Clusters and Range only come with samples (R1), via `params`.
+pub(crate) fn range_params(f: &Map<String, Value>) -> Value {
+    let src = params(f);
+    let mut p = Map::new();
+    p.insert("select".into(), json!("sampledColors"));
+    for k in ["color", "points", "subtractPoints", "order", "localized", "range"] {
+        if let Some(v) = src.get(k) {
+            p.insert(k.into(), v.clone());
         }
     }
+    p.insert("fuzziness".into(), json!(num(f, "fuzziness", 40.0).clamp(0.0, 200.0)));
+    Value::Object(p)
 }
 
 /// Whether the top dialog is Replace Color: the canvas is its eyedropper from the moment it opens.
@@ -80,12 +80,27 @@ pub(crate) fn sampling_top(app: &PhotocraftApp) -> bool {
 /// whether the click landed on the image.
 pub(crate) fn pick_top(app: &mut PhotocraftApp, at: [f64; 2], mods: egui::Modifiers) -> bool {
     let Some(mut f) = app.ui.dialogs.last().map(|d| &d.fields).filter(|f| owns(f)).cloned() else { return false };
+    if !pick_fields(app, &mut f, at, mods) {
+        return false;
+    }
+    match app.ui.dialogs.last_mut() {
+        Some(d) => {
+            d.fields = f;
+            true
+        }
+        None => false,
+    }
+}
+
+/// [`pick_top`] on a copy of the dialog's fields: the dialog body holds its own copy while it is
+/// drawn, so a click on the thumbnail has to land in that one.
+fn pick_fields(app: &mut PhotocraftApp, f: &mut Map<String, Value>, at: [f64; 2], mods: egui::Modifiers) -> bool {
     let Some(doc) = app.session.active().map(|st| &st.doc) else { return false };
     if !at[0].is_finite() || !at[1].is_finite() || at[0] < 0.0 || at[1] < 0.0 || at[0] >= f64::from(doc.size.width) || at[1] >= f64::from(doc.size.height) {
         return false;
     }
-    let tool = crate::color_range_ui::tool_of(&f, mods).to_string();
-    crate::color_range_ui::pick(app, &mut f, at, mods, "order");
+    let tool = crate::color_range_ui::tool_of(f, mods).to_string();
+    crate::color_range_ui::pick(app, f, at, mods, "order");
     // From colour follows the first sample (the point's own colour keeps the Lab box unchanged).
     let pts = f.get("points").and_then(Value::as_array).cloned().unwrap_or_default();
     let first = pts.first().and_then(|p| Some((p.get(0)?.as_f64()?, p.get(1)?.as_f64()?)));
@@ -99,13 +114,7 @@ pub(crate) fn pick_top(app: &mut PhotocraftApp, at: [f64; 2], mods: egui::Modifi
     if let Some(c) = f.get("color").cloned() {
         f.insert("__sampledColor".into(), c);
     }
-    match app.ui.dialogs.last_mut() {
-        Some(d) => {
-            d.fields = f;
-            true
-        }
-        None => false,
-    }
+    true
 }
 
 /// The canvas under the dialog: the eyedropper cursor at `over` (+ / − while Shift / Alt are
@@ -171,8 +180,64 @@ pub(crate) fn sync_result(f: &mut Map<String, Value>) {
     f.insert("__resultSynced".into(), json!(result));
 }
 
+/// Longest sides of the Selection / Image thumbnail, in points.
+const THUMB: egui::Vec2 = egui::vec2(200.0, 150.0);
+
+/// Photoshop's Selection / Image preview: the mask the sampled colours select (white = changed),
+/// or the image to pick from. Clicking it picks like a canvas click, Shift adds, Alt subtracts;
+/// Ctrl (Cmd on macOS) shows the other view while held.
+fn thumbnail(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+    use crate::color_range_ui::{Slot, mask_thumbnail, radio, thumbnail_error};
+    let t = Tokens::get(ui.ctx());
+    let view = f.get("__view").and_then(Value::as_str).unwrap_or("selection").to_string();
+    let swap = ui.input(|i| i.modifiers.command || (!cfg!(target_os = "macos") && i.modifiers.ctrl));
+    let (frame, resp) = ui.allocate_exact_size(THUMB, egui::Sense::click_and_drag());
+    ui.painter().rect_filled(frame, 0.0, t.canvas);
+    let shown = mask_thumbnail(app, ui.ctx(), Slot::ReplaceColor, &range_params(f), (view == "image") ^ swap);
+    let doc_size = app.session.active().map(|st| [f64::from(st.doc.size.width.max(1)), f64::from(st.doc.size.height.max(1))]);
+    if let (Some((tex, [w, h])), Some([dw, dh])) = (shown, doc_size) {
+        let scale = (THUMB.x / w.max(1) as f32).min(THUMB.y / h.max(1) as f32);
+        let img = egui::Rect::from_center_size(frame.center(), egui::vec2(w as f32 * scale, h as f32 * scale));
+        ui.painter().image(tex, img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+        // Response::clicked may take an accessibility input lock: ask before reading the pointer.
+        let clicked = resp.clicked();
+        let held = resp.is_pointer_button_down_on();
+        let mods = ui.input(|i| i.modifiers);
+        let sampling = if crate::color_range_ui::tool_of(f, mods) == "sample" {
+            ui.input(|i| (clicked && i.pointer.primary_pressed()) || (held && (i.pointer.primary_pressed() || i.pointer.delta() != egui::Vec2::ZERO)))
+        } else {
+            clicked
+        };
+        if let Some(p) = resp.interact_pointer_pos().filter(|p| sampling && img.contains(*p)) {
+            let at = [
+                (f64::from((p.x - img.left()) / img.width()) * dw).floor().clamp(0.0, dw - 1.0),
+                (f64::from((p.y - img.top()) / img.height()) * dh).floor().clamp(0.0, dh - 1.0),
+            ];
+            pick_fields(app, f, at, mods);
+        }
+    }
+    if let Some(e) = thumbnail_error(app, Slot::ReplaceColor) {
+        let msg = format!("{}\n{e}", tl!("Preview unavailable:"));
+        let g = ui.painter().layout(msg, egui::FontId::proportional(11.0), t.text_faint, frame.width() - 16.0);
+        ui.painter().rect_filled(frame, 0.0, t.canvas);
+        ui.painter().galley(frame.center() - g.size() / 2.0, g, t.text_faint);
+    }
+    ui.painter().rect_stroke(frame, 0.0, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Outside);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, ui.is_enabled(), tl!("Replace Color preview")));
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        if radio(ui, view == "selection", tl!("Selection")).clicked() {
+            f.insert("__view".into(), json!("selection"));
+        }
+        ui.add_space(8.0);
+        if radio(ui, view == "image", tl!("Image")).clicked() {
+            f.insert("__view".into(), json!("image"));
+        }
+    });
+}
+
 /// Dialog body, in Photoshop's order.
-pub(crate) fn body(_app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+pub(crate) fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     sync_result(f);
     let t = Tokens::get(ui.ctx());
     let localized = f.get("localized").and_then(Value::as_bool).unwrap_or(false);
@@ -209,7 +274,8 @@ pub(crate) fn body(_app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<Stri
     slider(ui, f, "fuzziness", 0.0..=200.0, 40.0);
     // Range only applies with Localized Color Clusters on, as in Photoshop.
     ui.add_enabled_ui(localized, |ui| slider(ui, f, "range", 0.0..=100.0, 100.0));
-    // The preview thumbnail (Selection / Image) goes here.
+    ui.add_space(6.0);
+    thumbnail(app, ui, f);
     ui.add_space(6.0);
     slider(ui, f, "hue", -180.0..=180.0, 0.0);
     slider(ui, f, "saturation", -100.0..=100.0, 0.0);
@@ -348,15 +414,91 @@ mod tests {
         assert!(p.as_object().unwrap().keys().all(|k| !k.starts_with("__")));
     }
 
-    /// The reduced live preview reads each sample from the pixel of the copy that covers it.
     #[test]
-    fn preview_scales_samples_to_the_reduced_copy() {
-        let app = app_with_doc();
-        let mut p = json!({"points": [[25.0, 9.0]], "subtractPoints": [[39.0, 29.0]], "hue": 10});
-        scale_samples_for_proxy(&mut p, &app.session, 4);
-        assert_eq!(p["points"], json!([[6.0, 2.0]]));
-        assert_eq!(p["subtractPoints"], json!([[9.0, 7.0]]));
-        assert_eq!(p["hue"], json!(10));
+    fn range_params_translate_samples() {
+        let mut f = Map::new();
+        f.insert("__filter".into(), json!(true));
+        f.insert("__command".into(), json!("image.adjustments.replaceColor"));
+        f.insert("color".into(), json!("#ff0000"));
+        f.insert("fuzziness".into(), json!(25));
+        f.insert("points".into(), json!([[1.0, 2.0]]));
+        f.insert("subtractPoints".into(), json!([]));
+        f.insert("order".into(), json!(["+"]));
+        f.insert("localized".into(), json!(true));
+        f.insert("range".into(), json!(40));
+        f.insert("hue".into(), json!(90));
+        let p = range_params(&f);
+        assert_eq!(p["select"], json!("sampledColors"));
+        assert_eq!(p["points"], json!([[1.0, 2.0]]));
+        assert_eq!(p["localized"], json!(true));
+        assert!(p.get("hue").is_none());
+        // R1: no samples, no localized / range.
+        f.insert("points".into(), json!([]));
+        f.insert("order".into(), json!([]));
+        let p = range_params(&f);
+        assert!(p.get("localized").is_none() && p.get("range").is_none() && p.get("points").is_none(), "{p}");
+    }
+
+    #[test]
+    fn thumbnail_mask_whites_out_sampled_red_only() {
+        let mut app = app_with_doc();
+        let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
+        pick_top(&mut app, [5.0, 5.0], egui::Modifiers::NONE);
+        let p = range_params(&app.ui.dialog_mut(id).unwrap().fields);
+        let mask = crate::color_range_ui::mask_values(&app, &p).unwrap();
+        let (w, _h) = mask.1;
+        assert!(mask.0[5 * w + 5] > 0.9);
+        assert!(mask.0[5 * w + 25] < 0.1);
+    }
+
+    /// Both dialogs share one cache type but not one cache: drawing one must not evict the other.
+    #[test]
+    fn thumbnail_caches_are_separate_per_dialog() {
+        use crate::color_range_ui::{Slot, mask_thumbnail};
+        let mut app = app_with_doc();
+        let ctx = egui::Context::default();
+        let p = json!({"select": "sampledColors", "points": [[5, 5]], "fuzziness": 20});
+        let q = json!({"select": "sampledColors", "points": [[25, 5]], "fuzziness": 20});
+        let a = mask_thumbnail(&mut app, &ctx, Slot::ColorRange, &p, false).unwrap().0;
+        let b = mask_thumbnail(&mut app, &ctx, Slot::ReplaceColor, &q, false).unwrap().0;
+        assert_ne!(a, b);
+        assert_eq!(mask_thumbnail(&mut app, &ctx, Slot::ColorRange, &p, false).unwrap().0, a, "Color Range's texture survives");
+        let image = mask_thumbnail(&mut app, &ctx, Slot::ReplaceColor, &q, true).unwrap();
+        assert_ne!(image.0, b);
+        assert_eq!(image.1, [40, 30]);
+    }
+
+    /// The reduced live preview takes its samples from the original document, as OK does: a
+    /// sample between thumbnail pixels must not read the averaged neighbour.
+    #[test]
+    fn reduced_preview_matches_the_original_eyedropper_sample() {
+        let mut doc = Document::with_background("fine detail", Size::new(400, 4), ColorMode::Rgb, SampleType::U8, Color::rgb(1.0, 0.0, 0.0));
+        let surface = doc.layers[0].surface_mut().unwrap();
+        surface.fill_rect(GRect::new(200, 0, 400, 4), &[0.0, 0.0, 1.0, 1.0]);
+        surface.fill_rect(GRect::new(101, 0, 102, 4), &[0.0, 0.0, 1.0, 1.0]);
+        let mut session = photocraft_engine::Session::new();
+        session.add_document(doc, None);
+        let mut app = PhotocraftApp::new(session, crate::Services::default());
+        let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
+        pick_top(&mut app, [101.0, 1.0], egui::Modifiers::NONE);
+        {
+            let f = &mut app.ui.dialog_mut(id).unwrap().fields;
+            f.insert("fuzziness".into(), json!(0));
+            f.insert("hue".into(), json!(120));
+        }
+        let params = crate::filter_dialog::params_of(&fields(&app));
+        let st = app.session.active().unwrap();
+        let (original, active) = (st.doc.clone(), st.active_layer);
+        let shown = crate::filter_dialog::preview_document(&original, active, COMMAND, &params, 2).unwrap();
+        let at = |d: &Document, x: i32| d.layers[0].surface().unwrap().read_region(GRect::new(x, 0, x + 1, 1));
+        let changed = |d: &Document, x: i32, from: &Document, fx: i32| at(d, x) != at(from, fx);
+        crate::dialogs::confirm(&mut app, id).unwrap();
+        let ok = &app.session.active().unwrap().doc;
+        assert!(changed(ok, 300, &original, 300), "OK recolours the blue half");
+        assert!(!changed(ok, 0, &original, 0), "OK leaves the red background");
+        let reduced = crate::proxy::proxy_document(&original, 2);
+        assert!(changed(&shown, 150, &reduced, 150), "preview must recolour the same blue pixels as OK");
+        assert!(!changed(&shown, 0, &reduced, 0), "preview must leave the red background alone");
     }
 
     #[test]
@@ -465,6 +607,38 @@ mod tests {
         let doc = h.state().session.active().unwrap();
         assert_eq!((doc.revision, doc.history.past_len()), (before, history), "nothing painted");
         assert!(h.state().drag.is_none());
+    }
+
+    /// A click on the thumbnail picks like a canvas click, and the radios switch its view.
+    #[test]
+    fn thumbnail_click_picks_and_radios_switch_the_view() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(900.0, 900.0))
+            .build_ui_state(|ui, app: &mut PhotocraftApp| crate::dialogs::show(app, ui.ctx()), app_with_doc());
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        crate::filter_dialog::open(h.state_mut(), COMMAND).unwrap();
+        h.run_steps(4);
+        assert_eq!(fields(h.state())["__view"], json!("selection"), "Selection is the default view");
+        // 40 x 30 doc in the 200 x 150 thumbnail: 5 pt per document pixel.
+        let at = h.get_by_label("Replace Color preview").rect().left_top() + egui::vec2(25.0 * 5.0 + 2.5, 5.0 * 5.0 + 2.5);
+        h.hover_at(at);
+        h.run_steps(1);
+        h.drag_at(at);
+        h.run_steps(1);
+        h.drop_at(at);
+        h.run_steps(2);
+        let f = fields(h.state());
+        assert_eq!(f["points"], json!([[25.0, 5.0]]));
+        assert_eq!(f["color"], json!("#0000ff"));
+        h.get_by_label("Image").click();
+        h.run_steps(2);
+        assert_eq!(fields(h.state())["__view"], json!("image"));
+        h.get_by_label("Selection").click();
+        h.run_steps(2);
+        assert_eq!(fields(h.state())["__view"], json!("selection"));
+        assert!(crate::filter_dialog::params_of(&fields(h.state())).get("__view").is_none(), "view state is not an engine param");
     }
 
     #[test]

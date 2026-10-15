@@ -683,6 +683,8 @@ pub struct PhotocraftApp {
     pub(crate) redraws: std::collections::HashMap<photocraft_doc::DocId, background_redraw::Redraw>,
     /// Select › Color Range dialog preview (proxy document + mask / image textures).
     pub(crate) color_range: Option<color_range_ui::Preview>,
+    /// Image › Adjustments › Replace Color's Selection / Image thumbnail (its own cache).
+    pub(crate) replace_color_preview: Option<color_range_ui::Preview>,
     /// Image › Adjustments dialog preview through a temporary clipped adjustment layer.
     pub(crate) adjust_preview: Option<adjust_preview::AdjustPreview>,
     /// Synthetic input events queued by automation (`ui.click`, `ui.key`, …), injected next frame.
@@ -882,6 +884,7 @@ impl PhotocraftApp {
             filter_preview_worker: Default::default(),
             redraws: Default::default(),
             color_range: None,
+            replace_color_preview: None,
             adjust_preview: None,
             synthetic: Vec::new(),
             automation_input: false,

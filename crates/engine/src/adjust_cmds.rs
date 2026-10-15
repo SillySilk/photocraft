@@ -334,20 +334,41 @@ fn shadows_highlights_params(p: &Value) -> ShadowsHighlights {
 }
 
 fn replace_color(s: &mut Session, p: &Value) -> Result<Value> {
-    const CMD: &str = "image.adjustments.replaceColor";
-    let (h, sat, l) = (num(p, "hue", 0.0).clamp(-180.0, 180.0), num(p, "saturation", 0.0).clamp(-100.0, 100.0), num(p, "lightness", 0.0).clamp(-100.0, 100.0));
-    // Photoshop's Replace Color is Select > Color Range plus Hue/Saturation: the same prepared
-    // query (Lab, add/subtract samples, Localized Color Clusters) picks what changes.
+    let samples = replace_color_samples(s, p)?;
+    replace_color_apply(s, p, &samples, 1)
+}
+
+/// Replace Color's prepared Color Range query: Photoshop's Replace Color is Select > Color Range
+/// plus Hue/Saturation, so the same query (Lab, add/subtract samples, Localized Color Clusters)
+/// picks what changes.
+fn replace_color_samples(s: &Session, p: &Value) -> Result<crate::selection_cmds::ColorRangeSamples> {
     let mut q = p.clone();
     if let Some(o) = q.as_object_mut() {
         o.insert("fuzziness".into(), json!(num(p, "fuzziness", 40.0).clamp(0.0, 200.0)));
     }
-    let samples = crate::selection_cmds::ColorRangeSamples::new_for(s, &q, CMD)?;
+    crate::selection_cmds::ColorRangeSamples::new_for(s, &q, REPLACE_COLOR)
+}
+
+fn replace_color_apply(s: &mut Session, p: &Value, samples: &crate::selection_cmds::ColorRangeSamples, k: u32) -> Result<Value> {
+    let (h, sat, l) = (num(p, "hue", 0.0).clamp(-180.0, 180.0), num(p, "saturation", 0.0).clamp(-100.0, 100.0), num(p, "lightness", 0.0).clamp(-100.0, 100.0));
     let area = s.active().ok_or(EngineError::NoDocument)?.doc.bounds();
     rgba_edit(s, "Replace Color", p, |px, r| {
-        let mask = samples.coverage(px, r.width() as usize, 1.0, [(r.x0 - area.x0) as f32, (r.y0 - area.y0) as f32]);
+        let mask = samples.coverage(px, r.width() as usize, k as f32, [(r.x0 - area.x0) as f32, (r.y0 - area.y0) as f32]);
         tone::replace_color_masked(px, &mask, h, sat, l);
     })
+}
+
+const REPLACE_COLOR: &str = "image.adjustments.replaceColor";
+
+/// The live preview of Replace Color on `s`, a copy of `original` reduced by `k`. The samples
+/// (eyedropper points, in document pixels) are read from the original document, as OK reads them:
+/// a reduced pixel is an average, which would widen the Lab box and match more than OK does.
+/// Everything else (what changes, how, the history step) is the command itself.
+pub fn replace_color_reduced(s: &mut Session, original: &photocraft_doc::Document, p: &Value, k: u32) -> Result<Value> {
+    let mut source = Session::new();
+    source.add_document(original.clone(), None);
+    let samples = replace_color_samples(&source, p)?;
+    replace_color_apply(s, p, &samples, k.max(1))
 }
 
 /// Straight RGBA pixels and an optional coverage mask for a document's layer (or its composite).

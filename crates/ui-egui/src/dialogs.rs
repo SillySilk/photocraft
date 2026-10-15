@@ -598,6 +598,7 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
         crate::guide_layout_ui::validate(app, &d.fields)?;
     }
     let d = app.ui.close_dialog(id).ok_or_else(|| format!("no dialog {id}"))?;
+    app.replace_color_preview = None;
     match d.kind {
         DialogKind::NewDocument => {
             let r = app.run("file.new", crate::new_doc_ui::command_params(&d.fields));
@@ -681,6 +682,7 @@ pub fn cancel(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
     app.ui.dialogs.retain(|d| !crate::layer_style::color_picker::child_of(&d.fields, id));
     app.filter_preview = None;
     app.color_range = None;
+    app.replace_color_preview = None;
     crate::type_panels_ui::color_picker::prune(app);
     Ok(Value::Null)
 }

@@ -182,6 +182,44 @@ pub struct Preview {
     overlay_key: u64,
 }
 
+/// Which dialog a preview cache belongs to, so Color Range and Replace Color (which draws the same
+/// thumbnail) never evict each other's proxy and textures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Slot {
+    ColorRange,
+    ReplaceColor,
+}
+
+impl Slot {
+    fn texture(self, what: &str) -> String {
+        match self {
+            Slot::ColorRange => format!("color-range-{what}"),
+            Slot::ReplaceColor => format!("replace-color-{what}"),
+        }
+    }
+}
+
+fn cache(app: &PhotocraftApp, slot: Slot) -> Option<&Preview> {
+    match slot {
+        Slot::ColorRange => app.color_range.as_ref(),
+        Slot::ReplaceColor => app.replace_color_preview.as_ref(),
+    }
+}
+
+fn cache_mut(app: &mut PhotocraftApp, slot: Slot) -> Option<&mut Preview> {
+    match slot {
+        Slot::ColorRange => app.color_range.as_mut(),
+        Slot::ReplaceColor => app.replace_color_preview.as_mut(),
+    }
+}
+
+fn cache_slot(app: &mut PhotocraftApp, slot: Slot) -> &mut Option<Preview> {
+    match slot {
+        Slot::ColorRange => &mut app.color_range,
+        Slot::ReplaceColor => &mut app.replace_color_preview,
+    }
+}
+
 fn hash(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
 }
@@ -289,11 +327,11 @@ fn proxy_mask(app: &PhotocraftApp, proxy: &Document, k: u32, params: &Value) -> 
 }
 
 /// Record why the preview failed (logged once per new reason), or clear it.
-fn report(app: &mut PhotocraftApp, error: Option<String>) {
-    let Some(p) = app.color_range.as_mut() else { return };
+fn report(app: &mut PhotocraftApp, slot: Slot, error: Option<String>) {
+    let Some(p) = cache_mut(app, slot) else { return };
     if p.error != error {
         if let Some(e) = &error {
-            log::warn!("Color Range preview: {e}");
+            log::warn!("{slot:?} preview: {e}");
         }
         p.error = error;
     }
@@ -302,15 +340,40 @@ fn report(app: &mut PhotocraftApp, error: Option<String>) {
 /// Refresh the cached proxy / textures for the active document and the dialog's params. Returns
 /// (texture to show, its size in proxy pixels, k).
 fn preview(app: &mut PhotocraftApp, ctx: &egui::Context, f: &Map<String, Value>) -> Option<(egui::TextureId, [usize; 2], u32)> {
-    let (doc_id, revision, doc) = {
+    let image_view = (s(f, "__view", "selection") == "image") ^ ctx.input(|i| i.modifiers.command || (!cfg!(target_os = "macos") && i.modifiers.ctrl));
+    thumbnail(app, ctx, Slot::ColorRange, &params(f), image_view)
+}
+
+/// The Selection / Image thumbnail of a Color Range style query: the mask `params` (the
+/// `select.colorRange` params) would select, as a grey texture, or with `image` the image itself,
+/// both on the cached proxy of the active document. Replace Color draws the same thumbnail from
+/// its own `slot`. Returns the texture and its size in proxy pixels.
+pub(crate) fn mask_thumbnail(app: &mut PhotocraftApp, ctx: &egui::Context, slot: Slot, params: &Value, image: bool) -> Option<(egui::TextureId, [usize; 2])> {
+    thumbnail(app, ctx, slot, params, image).map(|(id, size, _)| (id, size))
+}
+
+/// The proxy mask `params` would give on the active document, row-major 0..=1, and its size: the
+/// texture-free core of [`mask_thumbnail`] for tests (the proxy is the document itself up to `PREVIEW`).
+#[cfg(test)]
+pub(crate) fn mask_values(app: &PhotocraftApp, params: &Value) -> Option<(Vec<f32>, (usize, usize))> {
+    let doc = &app.session.active()?.doc;
+    let k = doc.size.width.max(doc.size.height).max(1).div_ceil(PREVIEW).max(1);
+    let proxy = crate::proxy::proxy_document(doc, k);
+    let mask = proxy_mask(app, &proxy, k, params).ok()?;
+    Some((mask, (proxy.size.width as usize, proxy.size.height as usize)))
+}
+
+fn thumbnail(app: &mut PhotocraftApp, ctx: &egui::Context, slot: Slot, params: &Value, image_view: bool) -> Option<(egui::TextureId, [usize; 2], u32)> {
+    let (doc_id, revision) = {
         let st = app.session.active()?;
-        (st.doc.id, st.revision, st.doc.clone())
+        (st.doc.id, st.revision)
     };
-    if !matches!(&app.color_range, Some(p) if p.doc == doc_id && p.revision == revision) {
+    if !matches!(cache(app, slot), Some(p) if p.doc == doc_id && p.revision == revision) {
+        let doc = app.session.active()?.doc.clone();
         let side = doc.size.width.max(doc.size.height).max(1);
         let k = side.div_ceil(PREVIEW).max(1);
         let proxy = Arc::new(crate::proxy::proxy_document(&doc, k));
-        app.color_range = Some(Preview {
+        *cache_slot(app, slot) = Some(Preview {
             doc: doc_id,
             revision,
             k,
@@ -324,66 +387,69 @@ fn preview(app: &mut PhotocraftApp, ctx: &egui::Context, f: &Map<String, Value>)
             overlay_key: 0,
         });
     }
-    let image_view = (s(f, "__view", "selection") == "image") ^ ctx.input(|i| i.modifiers.command || (!cfg!(target_os = "macos") && i.modifiers.ctrl));
-    let params = params(f);
-    let key = query_key(app, &params);
+    let key = query_key(app, params);
     let (proxy, k) = {
-        let p = app.color_range.as_ref()?;
+        let p = cache(app, slot)?;
         (p.proxy.clone(), p.k)
     };
     let (w, h) = (proxy.size.width as usize, proxy.size.height as usize);
     if image_view {
-        if app.color_range.as_ref().is_some_and(|p| p.image.is_none()) {
+        if cache(app, slot).is_some_and(|p| p.image.is_none()) {
             let buf = photocraft_compose::thumbnail_buffer(&proxy, proxy.size.width.max(proxy.size.height));
             let thumb = match app.session.color.canvas_display(&proxy) {
                 Ok(display) => display.to_rgba8(&buf),
                 Err(e) => {
-                    report(app, Some(e.to_string()));
+                    report(app, slot, Some(e.to_string()));
                     return None;
                 }
             };
             let size = [thumb.width as usize, thumb.height as usize];
             if size != [w, h] || thumb.pixels.len() != w * h * 4 {
-                report(app, Some(format!("the image thumbnail is {}×{}, expected {w}×{h}", thumb.width, thumb.height)));
+                report(app, slot, Some(format!("the image thumbnail is {}×{}, expected {w}×{h}", thumb.width, thumb.height)));
                 return None;
             }
             let img = egui::ColorImage::from_rgba_unmultiplied(size, &thumb.pixels);
-            let tex = ctx.load_texture("color-range-image", img, egui::TextureOptions::LINEAR);
-            if let Some(p) = app.color_range.as_mut() {
+            let tex = ctx.load_texture(slot.texture("image"), img, egui::TextureOptions::LINEAR);
+            if let Some(p) = cache_mut(app, slot) {
                 p.image = Some(tex);
             }
         }
-        return app.color_range.as_ref()?.image.as_ref().map(|t| (t.id(), [w, h], k));
+        return cache(app, slot)?.image.as_ref().map(|t| (t.id(), [w, h], k));
     }
-    if app.color_range.as_ref().is_some_and(|p| p.mask_key != key || p.mask.is_none()) {
-        let mask = match proxy_mask(app, &proxy, k, &params) {
+    if cache(app, slot).is_some_and(|p| p.mask_key != key || p.mask.is_none()) {
+        let mask = match proxy_mask(app, &proxy, k, params) {
             Ok(m) => {
-                report(app, None);
+                report(app, slot, None);
                 m
             }
             Err(e) => {
-                report(app, Some(e));
+                report(app, slot, Some(e));
                 vec![0.0; w * h]
             }
         };
         if mask.len() != w * h {
-            report(app, Some(format!("the selection preview has {} pixels, expected {}", mask.len(), w * h)));
+            report(app, slot, Some(format!("the selection preview has {} pixels, expected {}", mask.len(), w * h)));
             return None;
         }
         let px: Vec<Color32> = mask.iter().map(|v| Color32::from_gray((v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)).collect();
         let img = egui::ColorImage::new([w, h], px);
-        let p = app.color_range.as_mut()?;
+        let p = cache_mut(app, slot)?;
         match &mut p.mask {
             Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-            None => p.mask = Some(ctx.load_texture("color-range-mask", img, egui::TextureOptions::LINEAR)),
+            None => p.mask = Some(ctx.load_texture(slot.texture("mask"), img, egui::TextureOptions::LINEAR)),
         }
         p.mask_key = key;
     }
-    app.color_range.as_ref()?.mask.as_ref().map(|t| (t.id(), [w, h], k))
+    cache(app, slot)?.mask.as_ref().map(|t| (t.id(), [w, h], k))
+}
+
+/// Why the thumbnail of `slot` could not be drawn, if it could not.
+pub(crate) fn thumbnail_error(app: &PhotocraftApp, slot: Slot) -> Option<String> {
+    cache(app, slot).and_then(|p| p.error.clone())
 }
 
 /// Photoshop-style radio button.
-fn radio(ui: &mut egui::Ui, on: bool, label: &str) -> egui::Response {
+pub(crate) fn radio(ui: &mut egui::Ui, on: bool, label: &str) -> egui::Response {
     let t = Tokens::get(ui.ctx());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 5.0;
@@ -614,7 +680,7 @@ pub(crate) fn paint_selection_preview(app: &mut PhotocraftApp, ctx: &egui::Conte
         let mask = match proxy_mask(app, &proxy, k, &params) {
             Ok(mask) => mask,
             Err(e) => {
-                report(app, Some(e));
+                report(app, Slot::ColorRange, Some(e));
                 return;
             }
         };

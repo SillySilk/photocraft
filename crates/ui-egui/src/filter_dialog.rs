@@ -898,11 +898,13 @@ pub(crate) fn preview_document_for_target(
     if command.starts_with("filter.blurGallery.") {
         crate::blur_pins::scale_for_proxy(&mut p, run_k);
     }
-    // Replace Color's eyedropper samples are document pixels; the reduced copy is 1/k the size.
-    if command == REPLACE_COLOR {
-        crate::replace_color_ui::scale_samples_for_proxy(&mut p, &s, run_k);
+    // Replace Color's eyedropper samples are document pixels read from the original document,
+    // as OK does (a reduced pixel is an average); the copy is only what the result is drawn on.
+    if command == REPLACE_COLOR && run_k > 1 {
+        photocraft_engine::adjust_cmds::replace_color_reduced(&mut s, doc, &p, run_k).ok()?;
+    } else {
+        s.execute(command, p).ok()?;
     }
-    s.execute(command, p).ok()?;
     s.active().map(|d| crate::proxy::proxy_document(&d.doc, reduce_k))
 }
 
