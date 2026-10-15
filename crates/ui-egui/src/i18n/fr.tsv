@@ -3194,3 +3194,5 @@ curves	Smooth	Lisser
 	set name	nom du jeu
 	{set} (modified)	{set} (modifié)
 	Random	Aléatoire
+	Preview unavailable:	Aperçu indisponible :
+	Replace Color preview	Aperçu de Remplacement de couleur

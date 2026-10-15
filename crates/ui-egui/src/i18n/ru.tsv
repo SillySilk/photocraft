@@ -3159,3 +3159,5 @@ curves	Smooth	Сгладить
 	set name	имя набора
 	{set} (modified)	{set} (изменён)
 	Random	Случайно
+	Preview unavailable:	Предпросмотр недоступен:
+	Replace Color preview	Предпросмотр замены цвета
