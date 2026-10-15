@@ -73,14 +73,44 @@ pub fn replace_color_masked(px: &mut [[f32; 4]], mask: &[f32], hue: f32, saturat
             continue;
         }
         let c = [q[0], q[1], q[2]];
-        let [hh, ss, ll] = rgb_to_hsl(c);
-        let s = if saturation >= 0.0 { ss + (1.0 - ss) * saturation / 100.0 } else { ss * (1.0 + saturation / 100.0) };
-        let l = if lightness >= 0.0 { ll + (1.0 - ll) * lightness / 100.0 } else { ll * (1.0 + lightness / 100.0) };
-        let o = hsl_to_rgb([(hh + hue / 360.0).rem_euclid(1.0), s.clamp(0.0, 1.0), l.clamp(0.0, 1.0)]);
+        let o = shift_hsl(c, hue, saturation, lightness);
         for i in 0..3 {
             q[i] = (c[i] + (o[i] - c[i]) * k).clamp(0.0, 1.0);
         }
     }
+}
+
+/// One colour through Replace Color's hue (±180°), saturation and lightness (±100) shift.
+fn shift_hsl(c: [f32; 3], hue: f32, saturation: f32, lightness: f32) -> [f32; 3] {
+    let [hh, ss, ll] = rgb_to_hsl(c);
+    let s = if saturation >= 0.0 { ss + (1.0 - ss) * saturation / 100.0 } else { ss * (1.0 + saturation / 100.0) };
+    let l = if lightness >= 0.0 { ll + (1.0 - ll) * lightness / 100.0 } else { ll * (1.0 + lightness / 100.0) };
+    hsl_to_rgb([(hh + hue / 360.0).rem_euclid(1.0), s.clamp(0.0, 1.0), l.clamp(0.0, 1.0)])
+}
+
+/// The Result swatch of Replace Color: what `from` becomes under the shift.
+pub fn replace_color_result(from: [f32; 3], hue: f32, saturation: f32, lightness: f32) -> [f32; 3] {
+    shift_hsl(from.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }), hue, saturation, lightness)
+}
+
+/// The shift that takes `from` to `result` (Photoshop's Result swatch picker): `[hue, saturation,
+/// lightness]` in whole units, clamped to the dialog's ranges. Hue is 0 when `result` is grey.
+pub fn replace_color_shift(from: [f32; 3], result: [f32; 3]) -> [f32; 3] {
+    let clean = |c: [f32; 3]| c.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 });
+    let ([h0, s0, l0], [h1, s1, l1]) = (rgb_to_hsl(clean(from)), rgb_to_hsl(clean(result)));
+    // The inverse of shift_hsl's piecewise scale: up moves toward 1, down scales toward 0.
+    let amount = |a: f32, b: f32| {
+        if b >= a {
+            if a >= 1.0 { 0.0 } else { (b - a) / (1.0 - a) * 100.0 }
+        } else if a <= 0.0 {
+            0.0
+        } else {
+            (b / a - 1.0) * 100.0
+        }
+    };
+    let hue = if s1 <= 1e-4 { 0.0 } else { ((h1 - h0) * 360.0 + 540.0).rem_euclid(360.0) - 180.0 };
+    let v = [hue.clamp(-180.0, 180.0), amount(s0, s1).clamp(-100.0, 100.0), amount(l0, l1).clamp(-100.0, 100.0)];
+    v.map(|x| if x.is_finite() { x.round() + 0.0 } else { 0.0 })
 }
 
 /// Lab mean and standard deviation of the opaque pixels, `[L, a, b]` each.
@@ -326,5 +356,43 @@ mod tests {
         let mut px = ramp(40, 10);
         hdr_toning(&mut px, 40, 10, &HdrToning { strength: 0.0, detail: 0.0, saturation: 0.0, curve: vec![(0.0, 1.0), (1.0, 0.0)], ..Default::default() });
         assert!(luma([px[2][0], px[2][1], px[2][2]]) > luma([px[38][0], px[38][1], px[38][2]]));
+    }
+
+    #[test]
+    fn result_matches_masked_shift() {
+        let from = [0.8, 0.2, 0.2];
+        let mut px = vec![[from[0], from[1], from[2], 1.0]];
+        replace_color_masked(&mut px, &[1.0], 120.0, 30.0, -20.0);
+        let r = replace_color_result(from, 120.0, 30.0, -20.0);
+        for i in 0..3 {
+            assert!((px[0][i] - r[i]).abs() < 1e-6, "{:?} vs {r:?}", px[0]);
+        }
+    }
+
+    #[test]
+    fn shift_round_trips_to_result() {
+        let cases = [([0.8, 0.2, 0.2], [0.2, 0.3, 0.8]), ([0.3, 0.6, 0.3], [0.9, 0.8, 0.1]), ([0.5, 0.4, 0.7], [0.2, 0.1, 0.15])];
+        for (from, want) in cases {
+            let [h, s, l] = replace_color_shift(from, want);
+            let got = replace_color_result(from, h, s, l);
+            for i in 0..3 {
+                assert!((got[i] - want[i]).abs() < 0.03, "from {from:?} want {want:?} got {got:?} via {h},{s},{l}");
+            }
+        }
+    }
+
+    #[test]
+    fn shift_from_grey_is_finite_and_reaches_saturation() {
+        let [h, s, l] = replace_color_shift([0.5, 0.5, 0.5], [0.2, 0.4, 0.9]);
+        assert!(h.is_finite() && s.is_finite() && l.is_finite());
+        assert!(s > 50.0, "saturation should rise toward the target: {s}");
+        assert!((-180.0..=180.0).contains(&h) && (-100.0..=100.0).contains(&s) && (-100.0..=100.0).contains(&l));
+    }
+
+    #[test]
+    fn shift_is_identity_for_same_colour_and_rejects_nan() {
+        assert_eq!(replace_color_shift([0.4, 0.5, 0.6], [0.4, 0.5, 0.6]), [0.0, 0.0, 0.0]);
+        let v = replace_color_shift([f32::NAN, 0.0, 0.0], [0.0, f32::INFINITY, 0.0]);
+        assert!(v.iter().all(|x| x.is_finite()), "{v:?}");
     }
 }
