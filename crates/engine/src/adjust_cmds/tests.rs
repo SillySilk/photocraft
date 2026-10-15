@@ -661,3 +661,75 @@ fn replace_color_localized_clusters_only_change_the_colour_near_the_sample() {
     let err = s.execute("image.adjustments.replaceColor", json!({"points": [[1]]})).unwrap_err();
     assert!(err.to_string().contains("bad point"), "{err}");
 }
+
+/// 40×10 RGB: bright red, dark red, blue, white in four 10-px bands.
+fn red_shades_doc() -> Session {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 40, "height": 10, "depth": 8, "mode": "rgb"})).unwrap();
+    paint(&mut s, |x, _| match x / 10 {
+        0 => [1.0, 0.0, 0.0, 1.0],
+        1 => [180.0 / 255.0, 0.0, 0.0, 1.0],
+        2 => [0.0, 0.0, 1.0, 1.0],
+        _ => [1.0, 1.0, 1.0, 1.0],
+    });
+    s
+}
+
+fn history_len(s: &Session) -> usize {
+    s.active().unwrap().history.past_len()
+}
+
+#[test]
+fn replace_color_subtract_point_excludes_a_shade() {
+    // Sample the bright red, then subtract the dark red: only bright red shifts. (Photoshop's
+    // subtract pulls the matching box's edge in towards the subtracted colour, so it must lie
+    // outside the box; subtracting a colour that is itself a box edge leaves it ~92 % selected.)
+    let mut s = red_shades_doc();
+    s.execute("image.adjustments.replaceColor", json!({"points": [[5, 5]], "subtractPoints": [[15, 5]], "order": ["+", "-"], "fuzziness": 40, "hue": 120}))
+        .unwrap();
+    assert!(rgba(&s, 5, 5)[1] > 0.5, "bright red turned green");
+    assert!(rgba(&s, 15, 5)[1] < 0.1, "dark red left alone {:?}", rgba(&s, 15, 5));
+    assert_eq!(rgba(&s, 25, 5), [0.0, 0.0, 1.0, 1.0]);
+}
+
+#[test]
+fn subtract_before_sample_narrows_from_colour() {
+    let mut s = red_shades_doc();
+    s.execute("image.adjustments.replaceColor", json!({"color": "#ff0000", "subtractPoints": [[15, 5]], "fuzziness": 200, "hue": 120})).unwrap();
+    assert!(rgba(&s, 5, 5)[1] > 0.5);
+    assert!(rgba(&s, 15, 5)[1] < rgba(&s, 5, 5)[1]);
+}
+
+#[test]
+fn replace_color_still_takes_a_plain_colour() {
+    let mut s = red_shades_doc();
+    s.execute("image.adjustments.replaceColor", json!({"color": "#0000ff", "fuzziness": 0, "hue": 180})).unwrap();
+    assert!(rgba(&s, 25, 5)[2] < 0.5, "blue shifted");
+    assert_eq!(rgba(&s, 5, 5), [1.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn replace_color_is_one_history_step() {
+    let mut s = red_shades_doc();
+    let before = history_len(&s);
+    s.execute("image.adjustments.replaceColor", json!({"points": [[5, 5]], "hue": 90})).unwrap();
+    assert_eq!(history_len(&s), before + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(rgba(&s, 5, 5), [1.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn bad_samples_are_rejected_without_history() {
+    let mut s = red_shades_doc();
+    let before = history_len(&s);
+    for p in [
+        json!({"points": [[500, 5]]}),
+        json!({"points": [["x", 5]]}),
+        json!({"points": [[5, 5]], "subtractPoints": [[15, 5]], "order": ["+"]}),
+        json!({"localized": true}),
+    ] {
+        let e = s.execute("image.adjustments.replaceColor", p.clone()).unwrap_err().to_string();
+        assert!(e.contains("replaceColor"), "{p}: {e}");
+    }
+    assert_eq!(history_len(&s), before);
+}

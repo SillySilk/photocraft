@@ -218,9 +218,14 @@ impl ColorRangeSamples {
     /// Prepare the query without allocating a full-resolution composite. Point samples use
     /// exactly the same compositor/profile as the final selection.
     pub fn new(s: &Session, p: &Value) -> Result<Self> {
+        Self::new_for(s, p, "select.colorRange")
+    }
+
+    /// Like [`Self::new`], with `cmd` named in the BadParams messages.
+    pub fn new_for(s: &Session, p: &Value, cmd: &'static str) -> Result<Self> {
         let doc = &s.active().ok_or(EngineError::NoDocument)?.doc;
         let area = doc.bounds();
-        let bad = |msg: String| EngineError::BadParams { cmd: "select.colorRange".into(), msg };
+        let bad = |msg: String| EngineError::BadParams { cmd: cmd.into(), msg };
         let sample = |key: &str| -> Result<Vec<sel::RangeSample>> {
             let Some(pts) = p.get(key) else { return Ok(Vec::new()) };
             let pts = pts.as_array().ok_or_else(|| bad(format!("`{key}` must be [[x, y], …]")))?;
@@ -255,11 +260,11 @@ impl ColorRangeSamples {
             }
             Ok(samples)
         };
-        Self::with_samples(s, p, area, &sample("points")?, &sample("subtractPoints")?)
+        Self::with_samples(s, p, area, cmd, &sample("points")?, &sample("subtractPoints")?)
     }
 
-    fn with_samples(s: &Session, p: &Value, area: Rect, plus: &[sel::RangeSample], minus: &[sel::RangeSample]) -> Result<Self> {
-        let bad = |msg: String| EngineError::BadParams { cmd: "select.colorRange".into(), msg };
+    fn with_samples(s: &Session, p: &Value, area: Rect, cmd: &'static str, plus: &[sel::RangeSample], minus: &[sel::RangeSample]) -> Result<Self> {
+        let bad = |msg: String| EngineError::BadParams { cmd: cmd.into(), msg };
         let fuzz = |d: f32| f(p, "fuzziness", d).max(0.0);
         // The order the eyedropper clicks came in ("+" a point, "-" a subtracted point):
         // Photoshop applies them one after another. Without it, all additions come first.
@@ -364,7 +369,7 @@ fn color_range(s: &mut Session, p: &Value) -> Result<Value> {
             // limits the result (scope_color_range), not where colours are picked (#5244).
             let plus = eyedropper_samples(p, "points", area, &px, &bad)?;
             let minus = eyedropper_samples(p, "subtractPoints", area, &px, &bad)?;
-            let query = ColorRangeSamples::with_samples(s, p, area, &plus, &minus)?;
+            let query = ColorRangeSamples::with_samples(s, p, area, "select.colorRange", &plus, &minus)?;
             let mask = query.coverage(&px, w, 1.0, [0.0, 0.0]);
             (area, mask)
         }

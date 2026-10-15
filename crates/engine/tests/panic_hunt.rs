@@ -82,6 +82,9 @@ fn no_command_panics_or_hangs_on_adversarial_params() {
         json!({"x": -9, "y": -9, "radius": 0, "amount": 0, "angle": 0, "opacity": 0, "scale": 0, "levels": 0, "tolerance": 0, "gamma": 0, "layer": 999999, "channel": 999, "index": 999999, "count": 0}),
         json!({"x": 1e5, "y": -1e5, "radius": 300, "amount": 300, "angle": 1e5, "opacity": -100, "scale": -5, "gamma": -1}),
         json!({"points": [], "from": [0, 0], "to": [0, 0], "stops": [], "matrix": [0, 0, 0, 0, 0, 0], "colors": [], "name": "", "mode": "", "style": ""}),
+        // Eyedropper samples (Color Range, Replace Color): out-of-canvas, mistyped, mis-ordered.
+        json!({"points": [[0, 0], [1e9, -1e9], ["x", 1]], "subtractPoints": [[0, 0], [1]], "order": ["-", "+", "+", "x"], "localized": true, "range": 1e9, "fuzziness": 1e30, "hue": 1e30}),
+        json!({"points": [[1, 1]], "subtractPoints": [[2, 2]], "order": ["-", "+"], "localized": true, "range": 0, "fuzziness": 0}),
     ];
     let mut bad: Vec<String> = Vec::new();
     for spec in command_specs() {
