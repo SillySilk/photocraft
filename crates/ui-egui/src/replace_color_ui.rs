@@ -214,16 +214,18 @@ pub(crate) fn body(_app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<Stri
     slider(ui, f, "hue", -180.0..=180.0, 0.0);
     slider(ui, f, "saturation", -100.0..=100.0, 0.0);
     slider(ui, f, "lightness", -100.0..=100.0, 0.0);
-    ui.horizontal(|ui| {
-        let name = tl!("Result");
-        ui.label(egui::RichText::new(name).color(t.text_dim));
-        let rgb = rgb_of(f, "__result").unwrap_or([0.0; 3]);
-        let b = rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-        if widgets::color_swatch_button(ui, Color32::from_rgb(b[0], b[1], b[2]), name).clicked() {
-            crate::color_picker_ui::request_field(f, "__result", &crate::color_picker_ui::title_for(name));
-        }
-        ui.label(egui::RichText::new(crate::color_picker_ui::hex(rgb)).color(t.text_dim).monospace());
-    });
+    // No Result row without a valid `__result`: nothing is drawn in its place.
+    if let Some(rgb) = rgb_of(f, "__result") {
+        ui.horizontal(|ui| {
+            let name = tl!("Result");
+            ui.label(egui::RichText::new(name).color(t.text_dim));
+            let b = rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+            if widgets::color_swatch_button(ui, Color32::from_rgb(b[0], b[1], b[2]), name).clicked() {
+                crate::color_picker_ui::request_field(f, "__result", &crate::color_picker_ui::title_for(name));
+            }
+            ui.label(egui::RichText::new(crate::color_picker_ui::hex(rgb)).color(t.text_dim).monospace());
+        });
+    }
     if let Some(mut preview) = f.get("__preview").and_then(Value::as_bool) {
         ui.add_space(4.0);
         widgets::checkbox(ui, &mut preview, tl!("Preview"));
@@ -426,5 +428,50 @@ mod tests {
         let p = crate::filter_dialog::params_of(f);
         assert!(p.as_object().unwrap().keys().all(|k| !k.starts_with("__")), "{p}");
         crate::dialogs::confirm(&mut app, id).unwrap();
+    }
+
+    /// The control protocol's pointer samples like a canvas click and never reaches the tool.
+    #[test]
+    fn control_pointer_samples_with_modifiers_and_never_paints_under_the_dialog() {
+        use egui_kittest::Harness;
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(
+            |ui, app: &mut PhotocraftApp| {
+                crate::menus::menu_bar(app, ui);
+                crate::dialogs::show(app, ui.ctx());
+            },
+            app_with_doc(),
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        h.run_steps(2);
+        crate::filter_dialog::open(h.state_mut(), COMMAND).unwrap();
+        let doc = h.state().session.active().unwrap();
+        let (before, history) = (doc.revision, doc.history.past_len());
+        let ctx = h.ctx.clone();
+        for (events, mods) in [
+            (json!([{"kind":"down","x":2,"y":2},{"kind":"move","x":3,"y":2},{"kind":"up","x":3,"y":2}]), json!({})),
+            (json!([{"kind":"down","x":30,"y":2},{"kind":"up","x":30,"y":2}]), json!({"shift":true})),
+            (json!([{"kind":"down","x":31,"y":3},{"kind":"up","x":31,"y":3}]), json!({"alt":true})),
+        ] {
+            let mut p = json!({"events": events});
+            p["modifiers"] = mods;
+            let (req, _) = crate::control::ControlRequest::new("ui.pointer", p);
+            let _ = crate::control::handle(h.state_mut(), &ctx, &req);
+        }
+        let f = &h.state().ui.dialogs.last().unwrap().fields;
+        assert_eq!(f["points"], json!([[3.0, 2.0], [30.0, 2.0]]));
+        assert_eq!(f["subtractPoints"], json!([[31.0, 3.0]]));
+        assert_eq!(f["order"], json!(["+", "+", "-"]));
+        assert_eq!(f["color"], json!("#ff0000"), "From colour is the first sample");
+        let doc = h.state().session.active().unwrap();
+        assert_eq!((doc.revision, doc.history.past_len()), (before, history), "nothing painted");
+        assert!(h.state().drag.is_none());
+    }
+
+    #[test]
+    fn result_row_is_not_drawn_without_a_valid_result() {
+        assert!(rgb_of(&Map::new(), "__result").is_none());
+        let mut f = Map::new();
+        f.insert("__result".into(), json!("nope"));
+        assert!(rgb_of(&f, "__result").is_none());
     }
 }

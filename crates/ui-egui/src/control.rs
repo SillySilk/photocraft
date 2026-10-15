@@ -1035,7 +1035,8 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                 }
                 // The dialog owns all pointer events, including Up: no underlying brush stroke
                 // or context menu may leak through while inspecting a Color Range preview.
-                if app.ui.dialogs.last().is_some_and(|d| crate::color_range_ui::owns(&d.fields)) {
+                // Replace Color's eyedroppers are armed from the moment it opens, so it owns them too.
+                if app.ui.dialogs.last().is_some_and(|d| crate::color_range_ui::owns(&d.fields) || crate::replace_color_ui::owns(&d.fields)) {
                     let down = matches!(ev, ToolEvent::Down { .. });
                     let up = matches!(ev, ToolEvent::Up { .. });
                     let held = app.ui.dialogs.last().and_then(|d| d.fields.get("__pointerDown")).and_then(Value::as_bool).unwrap_or(false);
@@ -1043,7 +1044,11 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                         d.fields.insert("__pointerDown".into(), json!(!up && (down || held)));
                     }
                     if !up && (down || held) && !space && !secondary && button != "middle" {
-                        crate::color_range_ui::pick_top(app, [x, y], mods);
+                        if app.ui.dialogs.last().is_some_and(|d| crate::replace_color_ui::owns(&d.fields)) {
+                            crate::replace_color_ui::pick_top(app, [x, y], mods);
+                        } else {
+                            crate::color_range_ui::pick_top(app, [x, y], mods);
+                        }
                     }
                     continue;
                 }
