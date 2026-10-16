@@ -1801,6 +1801,29 @@ pub fn foreground_changed(app: &mut PhotocraftApp) {
     let _ = app.run("type.setStyle", p);
 }
 
+/// Whether the target type layer is Dynamic Text (its size comes from the box).
+fn is_fitted(app: &PhotocraftApp) -> bool {
+    target_text(app).is_some_and(|t| t.fit.is_some())
+}
+
+/// The Dynamic Text toggle: a "T" struck by a lightning bolt, highlighted while the layer is fitted.
+fn dynamic_text_button(ui: &mut egui::Ui, on: bool) -> egui::Response {
+    let tip = tl!("Dynamic Text");
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+    let col = crate::icons::button_chrome(ui, r, on, resp.hovered());
+    let c = r.center();
+    let st = Stroke::new(1.6, col);
+    let p = ui.painter();
+    // The T, left of centre.
+    p.line_segment([egui::pos2(c.x - 8.0, c.y - 6.0), egui::pos2(c.x + 1.0, c.y - 6.0)], st);
+    p.line_segment([egui::pos2(c.x - 3.5, c.y - 6.0), egui::pos2(c.x - 3.5, c.y + 6.0)], st);
+    // The bolt, right of the T.
+    let bolt = [egui::pos2(c.x + 6.5, c.y - 7.0), egui::pos2(c.x + 2.5, c.y + 0.5), egui::pos2(c.x + 6.0, c.y + 0.5), egui::pos2(c.x + 3.0, c.y + 7.0)];
+    p.add(egui::Shape::line(bolt.to_vec(), Stroke::new(1.4, col)));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), on, tip));
+    resp.on_hover_text(tip)
+}
+
 /// Photoshop's Type options bar.
 pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = crate::theme::Tokens::get(ui.ctx());
@@ -1848,10 +1871,23 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     crate::icons::paint(ui, r, "type", 13.0, t.icon);
     let (unit, label) = type_unit(app);
     let mut display = size * unit;
-    if crate::widgets::value_field(ui, &mut display, unit..=1296.0 * unit, label, 66.0).changed() {
+    let fitted = is_fitted(app);
+    let field = ui.add_enabled_ui(!fitted, |ui| crate::widgets::value_field(ui, &mut display, unit..=1296.0 * unit, label, 66.0)).inner;
+    if fitted {
+        field.on_disabled_hover_text(tl!("Size is set by Dynamic Text"));
+    } else if field.changed() {
         let size = display / unit;
         app.ui.tool_options.type_size = size;
         apply(app, ui.ctx(), json!({"size": size, "metricsAsShown": true}));
+    }
+    if dynamic_text_button(ui, fitted).clicked()
+        && let Some((layer, _)) = target(app)
+    {
+        let cmd = if fitted { "type.releaseDynamicText" } else { "type.convertToDynamicText" };
+        if let Err(e) = app.run(cmd, json!({ "layer": layer })) {
+            app.ui.status = e;
+            app.ui.status_error = true;
+        }
     }
     let mut aa = target(app)
         .and_then(|(id, _)| app.session.active().and_then(|st| text_layer(&st.doc, LayerId(id))))
@@ -2040,8 +2076,47 @@ fn icon_label(ui: &mut egui::Ui, icon: &str, tip: &str) {
     crate::widgets::scrub_label(ui, &resp.on_hover_text(tip));
 }
 
+/// Word Gap and Line Gap while the target layer is Dynamic Text. A drag is one history step.
+fn dynamic_text_gaps(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let Some(fit) = target_text(app).and_then(|t| t.fit) else { return };
+    let Some((layer, _)) = target(app) else { return };
+    for (key, label, current) in [("wordGap", tl!("Word Gap"), fit.word_gap), ("lineGap", tl!("Line Gap"), fit.line_gap)] {
+        let mut v = current;
+        ui.push_id(("dynamic-text-gap", key), |ui| {
+            if crate::widgets::slider_row(ui, label, &mut v, photocraft_doc::text::TextFit::GAP_MIN..=photocraft_doc::text::TextFit::GAP_MAX, "%", None)
+                .changed()
+            {
+                let mut p = json!({"layer": layer, key: v.round()});
+                if let Some(k) = drag_key(ui.ctx()) {
+                    p["coalesce"] = json!(k);
+                }
+                if let Err(e) = app.run("type.setDynamicText", p) {
+                    app.ui.status = e;
+                    app.ui.status_error = true;
+                }
+            }
+        });
+        ui.add_space(crate::theme::ROW_GAP);
+    }
+}
+
 /// Labelled numeric field (Photoshop's icon + value pairs). Returns the new value when edited.
 fn num_field(ui: &mut egui::Ui, label: &str, tip: &str, v: f32, range: std::ops::RangeInclusive<f32>, unit: &str, width: f32) -> Option<f32> {
+    num_field_enabled(ui, label, tip, v, range, unit, width, true)
+}
+
+/// [`num_field`] that can be greyed out. A disabled field says Dynamic Text sets the value.
+#[allow(clippy::too_many_arguments)]
+fn num_field_enabled(
+    ui: &mut egui::Ui,
+    label: &str,
+    tip: &str,
+    v: f32,
+    range: std::ops::RangeInclusive<f32>,
+    unit: &str,
+    width: f32,
+    enabled: bool,
+) -> Option<f32> {
     let t = crate::theme::Tokens::get(ui.ctx());
     let mut v = v;
     let mut out = None;
@@ -2050,13 +2125,15 @@ fn num_field(ui: &mut egui::Ui, label: &str, tip: &str, v: f32, range: std::ops:
         let (r, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
         ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, label, crate::theme::semibold(10.0), t.text_dim);
         crate::widgets::scrub_label(ui, &resp.on_hover_text(tl!(tip)));
-        let response = crate::widgets::value_field(ui, &mut v, range, unit, width);
+        let response = ui.add_enabled_ui(enabled, |ui| crate::widgets::value_field(ui, &mut v, range, unit, width)).inner;
         response.widget_info(|| {
-            let mut info = egui::WidgetInfo::drag_value(ui.is_enabled(), f64::from(v));
+            let mut info = egui::WidgetInfo::drag_value(enabled, f64::from(v));
             info.label = Some(tl!(tip).to_owned());
             info
         });
-        if response.changed() {
+        if !enabled {
+            response.on_disabled_hover_text(tl!("Size is set by Dynamic Text"));
+        } else if response.changed() {
             out = Some(v);
         }
     });
@@ -2265,19 +2342,21 @@ fn type_sections(app: &mut PhotocraftApp, ui: &mut egui::Ui, character: bool, pa
             }
         });
         axis_sliders(app, ui, &c);
+        let fitted = is_fitted(app);
         row(ui, &mut |ui| {
             let k = shown_scale(app);
             // Hover tips stay English until wired through `tl!` in a multi-locale change
             // (`every_tl_literal_is_translated` requires every complete catalog).
-            if let Some(v) = num_field(ui, "tT", "Font size", c.size_pt * k, 0.1..=1296.0, "pt", w) {
+            if let Some(v) = num_field_enabled(ui, "tT", "Font size", c.size_pt * k, 0.1..=1296.0, "pt", w, !fitted) {
                 app.ui.tool_options.type_size = v;
                 apply(app, ui.ctx(), json!({"size": v, "metricsAsShown": true}));
             }
             let lead = c.leading_pt.unwrap_or(c.size_pt * para.auto_leading.max(0.01)) * k;
-            if let Some(v) = num_field(ui, "A↕", "Leading (set to the font size × auto-leading when Auto)", lead, 0.1..=5000.0, "pt", w) {
+            if let Some(v) = num_field_enabled(ui, "A↕", "Leading (set to the font size × auto-leading when Auto)", lead, 0.1..=5000.0, "pt", w, !fitted) {
                 apply(app, ui.ctx(), json!({"leading": v, "metricsAsShown": true}));
             }
         });
+        dynamic_text_gaps(app, ui);
         row(ui, &mut |ui| {
             let shown = kerning_label(kerning_at(app).unwrap_or((c.kerning, c.kern)));
             ui.horizontal(|ui| {
@@ -2753,6 +2832,30 @@ mod tests {
         pointer_move(&mut app, 0.0, 99.0);
         pointer_up(&mut app, [110.0, 45.0], [0.0, 99.0]);
         assert_eq!(box_shape(&app, id), Some((0.0, 0.0, MIN_BOX, 30.0)));
+    }
+
+    #[test]
+    fn handle_drag_refits_live_in_one_step() {
+        let mut app = app();
+        pointer_up(&mut app, [10.0, 10.0], [190.0, 100.0]);
+        insert(&mut app, "Hello there friend");
+        let id = LayerId(app.ui.text_edit.as_ref().unwrap().layer);
+        app.run("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+        let size = |app: &PhotocraftApp| text_layer(&app.session.active().unwrap().doc, id).unwrap().size_pt;
+        let size0 = size(&app);
+        let before = app.session.active().unwrap().history.entries().len();
+        // The right edge's middle handle, dragged 100 px narrower in several moves.
+        assert!(pointer_down(&mut app, 190.0, 55.0, egui::Modifiers::NONE));
+        let mut last = size0;
+        for x in [170.0, 150.0, 120.0, 90.0] {
+            pointer_move(&mut app, x, 55.0);
+            let now = size(&app);
+            assert!(now <= last, "refits live: {last} -> {now}");
+            last = now;
+        }
+        pointer_up(&mut app, [190.0, 55.0], [90.0, 55.0]);
+        assert!(size(&app) < size0, "{size0} -> {}", size(&app));
+        assert_eq!(app.session.active().unwrap().history.entries().len(), before + 1);
     }
 
     #[test]

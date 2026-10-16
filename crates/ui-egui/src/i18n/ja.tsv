@@ -3865,3 +3865,9 @@ curves	Smooth	スムーズ
 	There are too many sets: delete one first.	セットが多すぎます。先に 1 つ削除してください。
 	set name	セット名
 	{set} (modified)	{set}（変更あり）
+	Dynamic Text	ダイナミックテキスト
+	Convert to Dynamic Text	ダイナミックテキストに変換
+	Release Dynamic Text	ダイナミックテキストを解除
+	Size is set by Dynamic Text	サイズはダイナミックテキストによって決まります
+	Word Gap	単語の間隔
+	Line Gap	行の間隔

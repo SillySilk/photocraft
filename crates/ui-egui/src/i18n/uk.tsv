@@ -3888,3 +3888,9 @@ curves	Smooth	Згладити
 	There are too many sets: delete one first.	Забагато наборів: спершу видаліть один.
 	set name	назва набору
 	{set} (modified)	{set} (змінено)
+	Dynamic Text	Динамічний текст
+	Convert to Dynamic Text	Перетворити на динамічний текст
+	Release Dynamic Text	Звільнити динамічний текст
+	Size is set by Dynamic Text	Розмір задається динамічним текстом
+	Word Gap	Інтервал між словами
+	Line Gap	Інтервал між рядками

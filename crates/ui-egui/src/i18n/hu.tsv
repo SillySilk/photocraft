@@ -4108,3 +4108,9 @@ cameraRaw	Yellow	Sárga
 	There are too many sets: delete one first.	Túl sok készlet van: előbb töröljön egyet.
 	set name	készlet neve
 	{set} (modified)	{set} (módosítva)
+	Dynamic Text	Dinamikus szöveg
+	Convert to Dynamic Text	Átalakítás dinamikus szöveggé
+	Release Dynamic Text	Dinamikus szöveg feloldása
+	Size is set by Dynamic Text	A méretet a dinamikus szöveg határozza meg
+	Word Gap	Szóköz mérete
+	Line Gap	Sorköz mérete

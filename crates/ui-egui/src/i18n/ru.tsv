@@ -3159,3 +3159,9 @@ curves	Smooth	Сгладить
 	set name	имя набора
 	{set} (modified)	{set} (изменён)
 	Random	Случайно
+	Dynamic Text	Динамический текст
+	Convert to Dynamic Text	Преобразовать в динамический текст
+	Release Dynamic Text	Освободить динамический текст
+	Size is set by Dynamic Text	Размер задаётся динамическим текстом
+	Word Gap	Интервал между словами
+	Line Gap	Интервал между строками

@@ -3787,3 +3787,9 @@ curves	Smooth	Wygładź
 	There are too many sets: delete one first.	Zestawów jest za dużo: najpierw usuń jeden.
 	set name	nazwa zestawu
 	{set} (modified)	{set} (zmieniony)
+	Dynamic Text	Tekst dynamiczny
+	Convert to Dynamic Text	Konwertuj na tekst dynamiczny
+	Release Dynamic Text	Zwolnij tekst dynamiczny
+	Size is set by Dynamic Text	Rozmiar jest ustalany przez tekst dynamiczny
+	Word Gap	Odstęp między wyrazami
+	Line Gap	Odstęp między wierszami

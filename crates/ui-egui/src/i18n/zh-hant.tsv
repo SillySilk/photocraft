@@ -2790,3 +2790,9 @@ curves	Smooth	平滑
 	set name	組合名稱
 	{set} (modified)	{set}（已修改）
 	Random	隨機
+	Dynamic Text	動態文字
+	Convert to Dynamic Text	轉換為動態文字
+	Release Dynamic Text	釋放動態文字
+	Size is set by Dynamic Text	大小由動態文字決定
+	Word Gap	字距
+	Line Gap	行距

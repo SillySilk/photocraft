@@ -3191,3 +3191,9 @@ curves	Smooth	Glätten
 	There are too many sets: delete one first.	Zu viele Sätze: Löschen Sie zuerst einen.
 	set name	Name des Satzes
 	{set} (modified)	{set} (geändert)
+	Dynamic Text	Dynamischer Text
+	Convert to Dynamic Text	In dynamischen Text konvertieren
+	Release Dynamic Text	Dynamischen Text aufheben
+	Size is set by Dynamic Text	Die Größe wird durch Dynamischen Text bestimmt
+	Word Gap	Wortabstand
+	Line Gap	Zeilenabstand
