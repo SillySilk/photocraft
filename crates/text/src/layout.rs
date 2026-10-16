@@ -1234,7 +1234,7 @@ fn first_strong_rtl(s: &str) -> Option<bool> {
 
 /// `st` at `scale` times its size, clamped to the type size range; explicit leading and baseline
 /// shift follow the size.
-fn scaled_style(st: &CharStyle, scale: f32) -> CharStyle {
+pub(crate) fn scaled_style(st: &CharStyle, scale: f32) -> CharStyle {
     let mut s = st.clone();
     if st.size_pt.is_finite() && st.size_pt > 0.0 {
         s.size_pt = (st.size_pt * scale).clamp(crate::fit::MIN_PT, crate::fit::MAX_PT);

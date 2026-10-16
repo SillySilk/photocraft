@@ -2258,8 +2258,10 @@ mod dynamic_text_ui {
         h.get_by_label("Dynamic Text").click();
         h.run_steps(3);
         assert!(!fitted(&h, id));
-        // Release baking the solved sizes into runs is spec step 10, a later task.
-        assert_eq!(text(h.state(), id).size_pt, 12.0, "release keeps the base size");
+        // Release keeps the per-line look: sizes and breaks are baked into the runs.
+        let t = text(h.state(), id);
+        assert!(t.runs.iter().any(|r| r.style.size_pt > 12.0), "the line stays big: {:?}", t.runs.iter().map(|r| r.style.size_pt).collect::<Vec<_>>());
+        assert!(t.size_pt > 12.0, "summary follows the first run: {}", t.size_pt);
     }
 
     #[test]

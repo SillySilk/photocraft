@@ -94,9 +94,19 @@ fn convert(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn release(s: &mut Session, p: &Value) -> Result<Value> {
     single_layer(s, RELEASE, p)?;
-    with_text(s, p, "Release Dynamic Text", |t, _| {
-        // The fitted sizes stay: only the fit is turned off.
-        t.fit.take().map(|_| ()).ok_or_else(|| bad(RELEASE, NOT_FITTED))
+    with_text(s, p, "Release Dynamic Text", |t, doc| {
+        if t.fit.is_none() {
+            return Err(bad(RELEASE, NOT_FITTED));
+        }
+        // The fitted look becomes ordinary type: a size and a break per line. Layers the solver
+        // never fitted (vertical, right-to-left) have no solved lines to bake.
+        if fit_refusal(t).is_some() {
+            t.fit = None;
+        } else {
+            let mut eng = photocraft_text::shared().lock().unwrap_or_else(|e| e.into_inner());
+            *t = photocraft_text::fit::bake(&mut eng, t, doc.resolution_dpi);
+        }
+        Ok(())
     })?;
     Ok(json!({"fit": false}))
 }
@@ -150,7 +160,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Release Dynamic Text",
             menu: &["Type"],
             shortcut: None,
-            params: r##"{"layer":id? (default active Type layer)} → fit off; the fitted sizes are kept"##,
+            params: r##"{"layer":id? (default active Type layer)} → fit off; a box keeps its look as ordinary type (a size and a line break per line), an area its fitted size"##,
             enabled: has_fit,
             journal: true,
             run: release,

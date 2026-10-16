@@ -629,13 +629,23 @@ impl Ex {
                     self.warnings
                         .push(format!("layer \"{}\": area type is saved as paragraph text over its path's bounds (PSD area type is not written yet)", l.name));
                 }
-                // Photoshop's own Dynamic Text data is not known: the layer saves at its fitted sizes.
+                // Photoshop's own Dynamic Text data is not known: the layer saves as the plain type
+                // it bakes to (a size and a line break per line). Stored TySh data of a fitted box
+                // is from before the bake, so it is regenerated.
                 if t.fit.is_some() {
                     self.warnings.push(format!("layer \"{}\": Dynamic Text is saved as regular text", l.name));
                 }
-                // Text layers without PSD data (created here) get a generated TySh.
-                let generated = t.psd_raw.is_none().then(|| std::sync::Arc::new(photocraft_text::psd::build_tysh(t, self.dpi, None)));
-                let src = t.psd_raw.as_ref().or(generated.as_ref());
+                let baked = photocraft_text::fit::is_fitted_box(t).then(|| {
+                    let mut eng = photocraft_text::shared().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let b = photocraft_text::fit::bake(&mut eng, t, self.dpi);
+                    let ink = eng.layout(&b, self.dpi).bounds();
+                    (b, ink)
+                });
+                let t = baked.as_ref().map_or(t, |(b, _)| b);
+                // Text layers without PSD data (created here, or baked just now) get a generated TySh.
+                let generated = (baked.is_some() || t.psd_raw.is_none())
+                    .then(|| std::sync::Arc::new(photocraft_text::psd::build_tysh(t, self.dpi, baked.as_ref().and_then(|(_, ink)| *ink))));
+                let src = generated.as_ref().or(t.psd_raw.as_ref());
                 // Character/paragraph style sheets from the document's styles.
                 let styled = src.and_then(|d| crate::text_styles_map::export_tysh(d, t, &self.text_styles, self.dpi)).map(std::sync::Arc::new);
                 // `TextIndex` names the layer's object in the document's `Txt2` (where the
