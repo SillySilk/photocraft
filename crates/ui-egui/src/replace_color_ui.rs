@@ -448,6 +448,30 @@ mod tests {
         }
     }
 
+    /// The From colour's Color Picker closing (OK or Cancel) keeps the thumbnail cache of the
+    /// Replace Color dialog still open under it; closing Replace Color itself drops it.
+    #[test]
+    fn closing_the_child_color_picker_keeps_the_thumbnail_cache() {
+        use crate::color_range_ui::{Slot, mask_thumbnail};
+        let mut app = app_with_doc();
+        let ctx = egui::Context::default();
+        let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
+        pick_top(&mut app, [5.0, 5.0], egui::Modifiers::NONE);
+        let p = params(&fields(&app));
+        for confirm in [true, false] {
+            mask_thumbnail(&mut app, &ctx, Slot::ReplaceColor, &p, false).unwrap();
+            let picker = crate::color_picker_ui::open_for_field(&mut app, "Color", [0.0, 1.0, 0.0], id, "color");
+            if confirm {
+                crate::dialogs::confirm(&mut app, picker).unwrap();
+            } else {
+                crate::dialogs::cancel(&mut app, picker).unwrap();
+            }
+            assert!(app.replace_color_preview.is_some(), "closing the child picker (confirm = {confirm}) keeps the cache");
+        }
+        crate::dialogs::confirm(&mut app, id).unwrap();
+        assert!(app.replace_color_preview.is_none(), "OK on Replace Color drops it");
+    }
+
     /// Both dialogs share one cache type but not one cache: drawing one must not evict the other.
     #[test]
     fn thumbnail_caches_are_separate_per_dialog() {
