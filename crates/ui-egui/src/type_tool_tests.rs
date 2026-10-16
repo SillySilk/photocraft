@@ -2290,6 +2290,63 @@ mod dynamic_text_ui {
         assert!(!h.get_by_label("Font size").accesskit_node().is_disabled());
     }
 
+    fn toggle_disabled(h: &Harness<'static, PhotocraftApp>) -> bool {
+        h.get_by_label("Dynamic Text").accesskit_node().is_disabled()
+    }
+
+    #[test]
+    fn toggle_is_disabled_when_conversion_would_be_refused() {
+        // No type layer.
+        let h = bar(new_app(), false);
+        assert!(toggle_disabled(&h));
+        // Vertical type.
+        let mut app = new_app();
+        app.run("type.create", json!({"x": 100, "y": 100, "text": "abc", "orientation": "vertical"})).unwrap();
+        assert!(toggle_disabled(&bar(app, false)));
+        // Type on a path.
+        let (mut app, id) = app_with_box_text("abc", 12.0);
+        app.session
+            .edit("path", |doc, _| {
+                doc.work_path = Some(photocraft_doc::vector::Path::new(vec![photocraft_doc::vector::Subpath::polyline(&[(10.0, 200.0), (390.0, 200.0)])]));
+                Ok(())
+            })
+            .unwrap();
+        app.run("type.attachToPath", json!({"layer": id.0})).unwrap();
+        assert!(toggle_disabled(&bar(app, false)));
+        // A box layer converts, and a fitted one can always be released.
+        let (app, _) = app_with_box_text("abc", 12.0);
+        let mut h = bar(app, false);
+        assert!(!toggle_disabled(&h));
+        h.state_mut().run("type.convertToDynamicText", json!({})).unwrap();
+        h.run_steps(3);
+        assert!(!toggle_disabled(&h));
+    }
+
+    #[test]
+    fn gap_slider_drag_is_one_history_step() {
+        let (mut app, id) = app_with_box_text("Hello there friend", 12.0);
+        app.run("type.convertToDynamicText", json!({})).unwrap();
+        let mut h = bar(app, true);
+        let before = h.state().session.active().unwrap().history.entries().len();
+        let y = h.get_by_label("Line Gap").rect().center().y;
+        // The slider is not an accessible node: it sits just under the label, as wide as the row.
+        let label = h.get_by_label("Line Gap").rect();
+        let field =
+            h.get_all_by_role(Role::SpinButton).min_by(|a, b| (a.rect().center().y - y).abs().total_cmp(&(b.rect().center().y - y).abs())).unwrap().rect();
+        let start = Pos2::new(label.left() + (field.right() - label.left()) * 0.3, label.center().y + 21.0);
+        h.hover_at(start);
+        h.run_steps(1);
+        press(&mut h, start, true);
+        for k in 1..=5 {
+            h.hover_at(start + vec2(15.0 * k as f32, 0.0));
+            h.run_steps(1);
+        }
+        press(&mut h, start + vec2(75.0, 0.0), false);
+        h.run_steps(2);
+        assert!(text(h.state(), id).fit.unwrap().line_gap != 0.0, "the drag moved the gap");
+        assert_eq!(h.state().session.active().unwrap().history.entries().len(), before + 1, "one step per drag");
+    }
+
     #[test]
     fn gap_field_edits_run_set_dynamic_text() {
         let (mut app, id) = app_with_box_text("Hello there friend", 12.0);

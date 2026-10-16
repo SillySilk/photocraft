@@ -3165,3 +3165,5 @@ curves	Smooth	Сгладить
 	Size is set by Dynamic Text	Размер задаётся динамическим текстом
 	Word Gap	Интервал между словами
 	Line Gap	Интервал между строками
+	Select a type layer	Выберите текстовый слой
+	Not available for vertical, right-to-left or path text	Недоступно для вертикального текста, текста справа налево и текста по контуру

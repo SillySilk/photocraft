@@ -4316,3 +4316,5 @@ shape	Appearance	Aspetto
 	Size is set by Dynamic Text	La dimensione è impostata dal testo dinamico
 	Word Gap	Spazio tra le parole
 	Line Gap	Spazio tra le righe
+	Select a type layer	Seleziona un livello di testo
+	Not available for vertical, right-to-left or path text	Non disponibile per testo verticale, da destra a sinistra o su tracciato

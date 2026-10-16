@@ -4157,3 +4157,5 @@ navigator	Zoom	Zoom
 	Size is set by Dynamic Text	El tamaño lo define el texto dinámico
 	Word Gap	Espacio entre palabras
 	Line Gap	Espacio entre líneas
+	Select a type layer	Seleccione una capa de texto
+	Not available for vertical, right-to-left or path text	No disponible para texto vertical, de derecha a izquierda ni en un trazado

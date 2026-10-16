@@ -2796,3 +2796,5 @@ curves	Smooth	平滑
 	Size is set by Dynamic Text	大小由動態文字決定
 	Word Gap	字距
 	Line Gap	行距
+	Select a type layer	請選擇文字圖層
+	Not available for vertical, right-to-left or path text	不適用於直排文字、由右至左的文字或路徑文字

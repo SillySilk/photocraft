@@ -4114,3 +4114,5 @@ cameraRaw	Yellow	Sárga
 	Size is set by Dynamic Text	A méretet a dinamikus szöveg határozza meg
 	Word Gap	Szóköz mérete
 	Line Gap	Sorköz mérete
+	Select a type layer	Válasszon ki egy szövegréteget
+	Not available for vertical, right-to-left or path text	Függőleges, jobbról balra írt vagy görbére illesztett szövegnél nem érhető el

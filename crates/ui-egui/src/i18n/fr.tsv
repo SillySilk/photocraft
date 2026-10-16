@@ -3200,3 +3200,5 @@ curves	Smooth	Lisser
 	Size is set by Dynamic Text	La taille est définie par le texte dynamique
 	Word Gap	Espace entre les mots
 	Line Gap	Espace entre les lignes
+	Select a type layer	Sélectionnez un calque de texte
+	Not available for vertical, right-to-left or path text	Indisponible pour le texte vertical, de droite à gauche ou sur un tracé

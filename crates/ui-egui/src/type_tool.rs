@@ -1807,10 +1807,12 @@ fn is_fitted(app: &PhotocraftApp) -> bool {
 }
 
 /// The Dynamic Text toggle: a "T" struck by a lightning bolt, highlighted while the layer is fitted.
-fn dynamic_text_button(ui: &mut egui::Ui, on: bool) -> egui::Response {
+fn dynamic_text_button(ui: &mut egui::Ui, on: bool, unavailable: Option<&str>) -> egui::Response {
     let tip = tl!("Dynamic Text");
-    let (r, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
-    let col = crate::icons::button_chrome(ui, r, on, resp.hovered());
+    let enabled = unavailable.is_none();
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    let col = crate::icons::button_chrome(ui, r, on, enabled && resp.hovered());
+    let col = if enabled { col } else { col.gamma_multiply(0.4) };
     let c = r.center();
     let st = Stroke::new(1.6, col);
     let p = ui.painter();
@@ -1820,8 +1822,18 @@ fn dynamic_text_button(ui: &mut egui::Ui, on: bool) -> egui::Response {
     // The bolt, right of the T.
     let bolt = [egui::pos2(c.x + 6.5, c.y - 7.0), egui::pos2(c.x + 2.5, c.y + 0.5), egui::pos2(c.x + 6.0, c.y + 0.5), egui::pos2(c.x + 3.0, c.y + 7.0)];
     p.add(egui::Shape::line(bolt.to_vec(), Stroke::new(1.4, col)));
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), on, tip));
-    resp.on_hover_text(tip)
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, on, tip));
+    resp.on_hover_text(unavailable.unwrap_or(tip))
+}
+
+/// Why the Dynamic Text toggle can't act on the target, or `None`. A fitted layer can always be
+/// released; an unfitted one must exist and pass the fit's own refusal check.
+fn dynamic_text_unavailable(app: &PhotocraftApp) -> Option<&'static str> {
+    let Some(t) = target_text(app) else { return Some(tl!("Select a type layer")) };
+    if t.fit.is_some() {
+        return None;
+    }
+    photocraft_engine::type_fit_cmds::fit_refusal(t).map(|_| tl!("Not available for vertical, right-to-left or path text"))
 }
 
 /// Photoshop's Type options bar.
@@ -1880,7 +1892,9 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         app.ui.tool_options.type_size = size;
         apply(app, ui.ctx(), json!({"size": size, "metricsAsShown": true}));
     }
-    if dynamic_text_button(ui, fitted).clicked()
+    let unavailable = dynamic_text_unavailable(app);
+    if dynamic_text_button(ui, fitted, unavailable).clicked()
+        && unavailable.is_none()
         && let Some((layer, _)) = target(app)
     {
         let cmd = if fitted { "type.releaseDynamicText" } else { "type.convertToDynamicText" };
@@ -2080,7 +2094,8 @@ fn icon_label(ui: &mut egui::Ui, icon: &str, tip: &str) {
 fn dynamic_text_gaps(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let Some(fit) = target_text(app).and_then(|t| t.fit) else { return };
     let Some((layer, _)) = target(app) else { return };
-    for (key, label, current) in [("wordGap", tl!("Word Gap"), fit.word_gap), ("lineGap", tl!("Line Gap"), fit.line_gap)] {
+    // `slider_row` translates its label, so it gets the English key.
+    for (key, label, current) in [("wordGap", "Word Gap", fit.word_gap), ("lineGap", "Line Gap", fit.line_gap)] {
         let mut v = current;
         ui.push_id(("dynamic-text-gap", key), |ui| {
             if crate::widgets::slider_row(ui, label, &mut v, photocraft_doc::text::TextFit::GAP_MIN..=photocraft_doc::text::TextFit::GAP_MAX, "%", None)
