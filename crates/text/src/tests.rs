@@ -2330,9 +2330,9 @@ b",
         20.0,
         (0.0, 0.0, 400.0, 400.0),
     );
-    t.fit = Some(TextFit { word_gap: 0.0, line_gap: 0.0 });
+    t.fit = Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: vec![] });
     let l0 = layout_of(&t);
-    t.fit = Some(TextFit { word_gap: 0.0, line_gap: 100.0 });
+    t.fit = Some(TextFit { word_gap: 0.0, line_gap: 100.0, lines: vec![] });
     let l1 = layout_of(&t);
     let step = |l: &crate::TextLayout| l.lines[1].baseline - l.lines[0].baseline;
     let px = 20.0 * l0.px_per_pt;
@@ -2347,7 +2347,7 @@ fn word_gap_widens_lines() {
         let l = layout_of(&t);
         l.lines[0].x1 - l.lines[0].x0
     };
-    t.fit = Some(TextFit { word_gap: 100.0, line_gap: 0.0 });
+    t.fit = Some(TextFit { word_gap: 100.0, line_gap: 0.0, lines: vec![] });
     let w1 = {
         let l = layout_of(&t);
         l.lines[0].x1 - l.lines[0].x0
@@ -2422,7 +2422,7 @@ fn area_line_gap_spreads_rows() {
     t.shape = TextShape::Area { path: area_poly(&[(0.0, 0.0), (120.0, 0.0), (120.0, 600.0), (0.0, 600.0)]) };
     let step = |gap: f32| {
         let mut t = t.clone();
-        t.fit = Some(TextFit { word_gap: 0.0, line_gap: gap });
+        t.fit = Some(TextFit { word_gap: 0.0, line_gap: gap, lines: vec![] });
         let l = layout_of(&t);
         assert!(l.lines.len() >= 3 && !l.overflowed, "{:?}", l.lines);
         l.lines[1].baseline - l.lines[0].baseline

@@ -130,7 +130,14 @@ fn gaps_validate_and_apply() {
     let (mut s, id) = session_with_box_text("a b c d e f", 12.0, [0.0, 0.0, 300.0, 300.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
     let before = history_len(&s);
-    for bad in [json!({"wordGap": "x"}), json!({"lineGap": 1000}), json!({"wordGap": -51}), json!({"lineGap": true}), json!({"wordGap": 200.5})] {
+    for bad in [
+        json!({"wordGap": "x"}),
+        json!({"lineGap": 1000}),
+        json!({"wordGap": -101}),
+        json!({"lineGap": -51}),
+        json!({"lineGap": true}),
+        json!({"wordGap": 200.5}),
+    ] {
         let mut p = bad.clone();
         p["layer"] = json!(id.0);
         let e = s.execute("type.setDynamicText", p).unwrap_err();
@@ -143,7 +150,14 @@ fn gaps_validate_and_apply() {
     assert_eq!(text(&s, id).fit.unwrap().line_gap, 50.0);
     assert_eq!(text(&s, id).fit.unwrap().word_gap, 0.0, "unspecified gap kept");
     s.execute("type.setDynamicText", json!({"layer": id.0, "wordGap": -50, "lineGap": 200})).unwrap();
-    assert_eq!(text(&s, id).fit, Some(TextFit { word_gap: -50.0, line_gap: 200.0 }));
+    assert_eq!(text(&s, id).fit, Some(TextFit { word_gap: -50.0, line_gap: 200.0, lines: vec![] }));
+    // Word gap goes down to -100, line gap only to -50; each error names its own range.
+    s.execute("type.setDynamicText", json!({"layer": id.0, "wordGap": -100, "lineGap": -50})).unwrap();
+    assert_eq!(text(&s, id).fit.unwrap().word_gap, -100.0);
+    let e = s.execute("type.setDynamicText", json!({"layer": id.0, "wordGap": -101})).unwrap_err().to_string();
+    assert!(e.contains("-100 to 200"), "{e}");
+    let e = s.execute("type.setDynamicText", json!({"layer": id.0, "lineGap": -51})).unwrap_err().to_string();
+    assert!(e.contains("-50 to 200"), "{e}");
 }
 
 #[test]

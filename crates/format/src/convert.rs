@@ -144,7 +144,7 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
             orientation: t.orientation,
             antialias: t.antialias,
             warp: t.warp.clone(),
-            fit: t.fit.map(photocraft_doc::text::TextFit::sanitized),
+            fit: t.fit.clone().map(|f| f.sanitized(&t.text)),
         },
         LayerContent::Shape(s) => ContentM::Shape {
             fill: s.fill.clone(),
@@ -465,7 +465,7 @@ impl Loader<'_> {
                     orientation: *orientation,
                     antialias: *antialias,
                     warp: warp.clone(),
-                    fit: fit.map(|f| f.sanitized()),
+                    fit: fit.clone().map(|f| f.sanitized(text)),
                 })
             }
             ContentM::Shape { fill, cache, psd_raw, path, stroke, live } => LayerContent::Shape(ShapeLayer {

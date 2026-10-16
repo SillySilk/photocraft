@@ -2092,15 +2092,16 @@ fn icon_label(ui: &mut egui::Ui, icon: &str, tip: &str) {
 
 /// Word Gap and Line Gap while the target layer is Dynamic Text. A drag is one history step.
 fn dynamic_text_gaps(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    let Some(fit) = target_text(app).and_then(|t| t.fit) else { return };
+    use photocraft_doc::text::TextFit;
+    let Some(fit) = target_text(app).and_then(|t| t.fit.clone()) else { return };
     let Some((layer, _)) = target(app) else { return };
     // `slider_row` translates its label, so it gets the English key.
-    for (key, label, current) in [("wordGap", "Word Gap", fit.word_gap), ("lineGap", "Line Gap", fit.line_gap)] {
+    for (key, label, current, min) in
+        [("wordGap", "Word Gap", fit.word_gap, TextFit::WORD_GAP_MIN), ("lineGap", "Line Gap", fit.line_gap, TextFit::LINE_GAP_MIN)]
+    {
         let mut v = current;
         ui.push_id(("dynamic-text-gap", key), |ui| {
-            if crate::widgets::slider_row(ui, label, &mut v, photocraft_doc::text::TextFit::GAP_MIN..=photocraft_doc::text::TextFit::GAP_MAX, "%", None)
-                .changed()
-            {
+            if crate::widgets::slider_row(ui, label, &mut v, min..=TextFit::GAP_MAX, "%", None).changed() {
                 let mut p = json!({"layer": layer, key: v.round()});
                 if let Some(k) = drag_key(ui.ctx()) {
                     p["coalesce"] = json!(k);

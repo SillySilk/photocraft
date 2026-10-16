@@ -622,7 +622,7 @@ fn text_fits(doc: &Document) -> Vec<Option<photocraft_doc::text::TextFit>> {
     doc.walk()
         .into_iter()
         .filter_map(|(_, _, l)| match &l.content {
-            LayerContent::Text(t) => Some(t.fit),
+            LayerContent::Text(t) => Some(t.fit.clone()),
             _ => None,
         })
         .collect()
@@ -635,16 +635,48 @@ fn fit_round_trips() {
     let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
     let ids: Vec<LayerId> = doc.walk().into_iter().filter(|(_, _, l)| matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.id).collect();
     assert!(!ids.is_empty());
-    let fit = TextFit { word_gap: 10.0, line_gap: -5.0 };
+    let fit = TextFit { word_gap: 10.0, line_gap: -5.0, lines: vec![] };
     for id in ids {
         if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
             t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
-            t.fit = Some(fit);
+            t.fit = Some(fit.clone());
         }
     }
     let back = load_from_bytes(&save_to_bytes(&doc, &SaveOptions::default()).unwrap()).unwrap();
     let fits = text_fits(&back);
-    assert!(!fits.is_empty() && fits.iter().all(|f| *f == Some(fit)));
+    assert!(!fits.is_empty() && fits.iter().all(|f| *f == Some(fit.clone())));
+}
+
+/// The solver's lines survive .pcraft; hostile ones are dropped on load.
+#[test]
+fn lines_round_trip() {
+    use photocraft_doc::text::{FitLine, TextFit, TextShape};
+    let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
+    let ids: Vec<LayerId> = doc.walk().into_iter().filter(|(_, _, l)| matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.id).collect();
+    assert!(!ids.is_empty());
+    let lines = vec![FitLine { start: 0, scale: 1.5 }, FitLine { start: 6, scale: 0.8 }];
+    for id in ids {
+        if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
+            t.text = "hello world".into();
+            t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
+            t.fit = Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: lines.clone() });
+        }
+    }
+    let back = load_from_bytes(&save_to_bytes(&doc, &SaveOptions::default()).unwrap()).unwrap();
+    let fits = text_fits(&back);
+    assert!(!fits.is_empty() && fits.iter().all(|f| f.as_ref().map(|f| &f.lines) == Some(&lines)));
+}
+
+/// A manifest fit without a `lines` key (a file saved before lines existed) loads with none.
+#[test]
+fn missing_lines_load_empty() {
+    let doc = rich_doc(ColorMode::Rgb, SampleType::U8);
+    let bytes = save_to_bytes(&doc, &SaveOptions::default()).unwrap();
+    let old = edit_text_manifest(&bytes, |m| {
+        m.insert("fit".into(), serde_json::json!({ "wordGap": 5.0, "lineGap": 7.0 }));
+    });
+    let fits = text_fits(&load_from_bytes(&old).unwrap());
+    assert!(!fits.is_empty() && fits.iter().all(|f| f.as_ref().is_some_and(|f| f.lines.is_empty() && f.word_gap == 5.0 && f.line_gap == 7.0)));
 }
 
 /// Files saved before Dynamic Text have no `fit` key and load as ordinary type.
@@ -669,7 +701,7 @@ fn nan_gaps_clamp_on_load() {
         m.insert("fit".into(), serde_json::json!({ "lineGap": 1e9, "wordGap": -1e9 }));
     });
     let fits = text_fits(&load_from_bytes(&hostile).unwrap());
-    let want = Some(TextFit { word_gap: TextFit::GAP_MIN, line_gap: TextFit::GAP_MAX });
+    let want = Some(TextFit { word_gap: TextFit::WORD_GAP_MIN, line_gap: TextFit::GAP_MAX, lines: vec![] });
     assert!(!fits.is_empty() && fits.iter().all(|f| *f == want));
 }
 
@@ -682,12 +714,12 @@ fn non_finite_gaps_save_as_a_loadable_file() {
     assert!(!ids.is_empty());
     for id in ids {
         if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
-            t.fit = Some(TextFit { word_gap: f32::NAN, line_gap: f32::INFINITY });
+            t.fit = Some(TextFit { word_gap: f32::NAN, line_gap: f32::INFINITY, lines: vec![] });
         }
     }
     let back = load_from_bytes(&save_to_bytes(&doc, &SaveOptions::default()).unwrap()).unwrap();
     let fits = text_fits(&back);
-    assert!(!fits.is_empty() && fits.iter().all(|f| *f == Some(TextFit { word_gap: 0.0, line_gap: 0.0 })));
+    assert!(!fits.is_empty() && fits.iter().all(|f| *f == Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: vec![] })));
 }
 
 #[test]

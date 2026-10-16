@@ -469,7 +469,7 @@ impl Layouter {
         let vertical = t.orientation == Orientation::Vertical;
         // Dynamic Text: a word gap widens each space and a line gap replaces the leading, both
         // percent of the font size. None lays out exactly as before.
-        let fit = t.fit.map(TextFit::sanitized);
+        let fit = t.fit.clone().map(|f| f.sanitized(&t.text));
         let mut out = TextLayout { px_per_pt: k, vertical, ..Default::default() };
         // Resolve families (PostScript names from PSDs, unknown families).
         for r in &runs {
@@ -610,7 +610,7 @@ impl Layouter {
                 for p in style_props(&out.styles[si0], k, &fallback, si0 as u32, small_caps[si0]) {
                     b.push_default(p);
                 }
-                if let Some(f) = fit {
+                if let Some(f) = fit.as_ref() {
                     b.push_default(StyleProperty::WordSpacing(f.word_gap / 100.0 * out.styles[si0].size_pt * k));
                 }
                 for (ri, st) in out.styles.iter().enumerate() {
@@ -624,7 +624,7 @@ impl Layouter {
                         b.push(p, range.clone());
                     }
                     // Parley widens each space (U+0020 and no-break space) by the word spacing.
-                    if let Some(f) = fit {
+                    if let Some(f) = fit.as_ref() {
                         b.push(StyleProperty::WordSpacing(f.word_gap / 100.0 * st.size_pt * k), range.clone());
                     }
                     if vertical {
@@ -693,7 +693,7 @@ impl Layouter {
                 // largest leading, measured on the unwrapped paragraph), so no wrapped line comes
                 // out taller than the row it was planned in and no second plan is needed.
                 layout.break_all_lines(None);
-                let m = area_metrics(layout, &out.styles, &ps, k, first_style, vertical, fit);
+                let m = area_metrics(layout, &out.styles, &ps, k, first_style, vertical, fit.as_ref());
                 break_area(layout, a, area_from(m), m, (indent_start, indent_end), first_px, &area_budget)
             };
             // Paragraph text: a tab is never wider than a space plus one tab interval, so breaking
@@ -749,7 +749,7 @@ impl Layouter {
                     break;
                 }
                 let m = *line.metrics();
-                let LineMetrics { ascent, descent, leading } = line_metrics(&line, &out.styles, &ps, k, first_style, vertical, fit);
+                let LineMetrics { ascent, descent, leading } = line_metrics(&line, &out.styles, &ps, k, first_style, vertical, fit.as_ref());
                 let baseline = match (slot, prev_baseline) {
                     (Some(s), _) => s.baseline,
                     // The first column's right edge touches the box's right edge.
@@ -1287,7 +1287,7 @@ fn line_metrics(
     k: f32,
     fallback: &CharStyle,
     vertical: bool,
-    fit: Option<TextFit>,
+    fit: Option<&TextFit>,
 ) -> LineMetrics {
     let first_px = fallback.size_pt * k;
     let m = line.metrics();
@@ -1331,7 +1331,7 @@ fn area_metrics(
     k: f32,
     fallback: &CharStyle,
     vertical: bool,
-    fit: Option<TextFit>,
+    fit: Option<&TextFit>,
 ) -> LineMetrics {
     layout.lines().map(|line| line_metrics(&line, styles, ps, k, fallback, vertical, fit)).fold(
         LineMetrics { ascent: 0.0, descent: 0.0, leading: 0.0 },
