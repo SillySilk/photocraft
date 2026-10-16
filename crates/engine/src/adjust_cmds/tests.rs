@@ -709,7 +709,7 @@ fn greens(s: &Session) -> [f32; 3] {
 }
 
 #[test]
-fn replace_color_subtract_point_excludes_a_shade() {
+fn replace_color_subtracting_a_shade_inside_the_sampled_range_trims_the_nearer_edge() {
     // Bright and dark red span the match; subtracting the mid red between them pulls the nearer
     // edge onto it, so one end drops out. Control: without the subtract all three shift.
     for depth in DEPTHS {
@@ -731,8 +731,9 @@ fn replace_color_subtract_point_excludes_a_shade() {
 }
 
 #[test]
-fn subtract_before_sample_narrows_from_colour() {
-    // No eyedropper points: the colours span the match and the subtract narrows it.
+fn replace_color_subtracting_a_shade_inside_the_from_colours_trims_the_nearer_edge() {
+    // No eyedropper points: the colours span the match; subtracting the mid red between them pulls
+    // the nearer edge onto it.
     for depth in DEPTHS {
         let run = |extra: Value| {
             let mut s = three_reds_doc(depth);
@@ -746,6 +747,26 @@ fn subtract_before_sample_narrows_from_colour() {
         eprintln!("control {control:?} subtract {sub:?}");
         assert!(control.iter().all(|g| *g > 0.5), "{depth}-bit: {control:?}");
         assert!(sub[0].min(sub[2]) < control[0].min(control[2]) - 0.3, "{depth}-bit: subtract narrows: {sub:?} vs {control:?}");
+    }
+}
+
+/// A single From colour spans a one-colour Lab box, which `LabRange::subtract` cannot shrink (it
+/// only moves an edge, and never past the other): a subtract point is accepted and changes nothing.
+#[test]
+fn replace_color_subtract_from_a_single_colour_changes_nothing() {
+    for depth in DEPTHS {
+        let run = |extra: Value| {
+            let mut s = three_reds_doc(depth);
+            let mut p = json!({"color": "#ff0000", "fuzziness": 10, "hue": 120});
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            s.execute("image.adjustments.replaceColor", p).unwrap();
+            (0..40).map(|x| rgba(&s, x, 5)).collect::<Vec<_>>()
+        };
+        let control = run(json!({}));
+        assert!(control[5][1] > 0.5, "{depth}-bit: the control recolours bright red");
+        for at in [[5, 5], [15, 5], [35, 5]] {
+            assert_eq!(run(json!({"subtractPoints": [at]})), control, "{depth}-bit: subtracting at {at:?}");
+        }
     }
 }
 
