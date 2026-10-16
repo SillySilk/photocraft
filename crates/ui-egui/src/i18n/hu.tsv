@@ -4112,6 +4112,7 @@ cameraRaw	Yellow	Sárga
 	Convert to Dynamic Text	Átalakítás dinamikus szöveggé
 	Release Dynamic Text	Dinamikus szöveg feloldása
 	Size is set by Dynamic Text	A méretet a dinamikus szöveg határozza meg
+	Leading is set by Line Gap	A sorközt a sorköz mérete határozza meg
 	Word Gap	Szóköz mérete
 	Line Gap	Sorköz mérete
 	Select a type layer	Válasszon ki egy szövegréteget

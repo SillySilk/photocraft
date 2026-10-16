@@ -3953,6 +3953,7 @@ curves	Smooth	Vloeiend maken
 	Convert to Dynamic Text	Converteren naar dynamische tekst
 	Release Dynamic Text	Dynamische tekst loslaten
 	Size is set by Dynamic Text	De grootte wordt bepaald door dynamische tekst
+	Leading is set by Line Gap	De interlinie wordt bepaald door de regelafstand
 	Word Gap	Woordafstand
 	Line Gap	Regelafstand
 	Select a type layer	Selecteer een tekstlaag

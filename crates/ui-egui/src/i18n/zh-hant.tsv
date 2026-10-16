@@ -2794,6 +2794,7 @@ curves	Smooth	平滑
 	Convert to Dynamic Text	轉換為動態文字
 	Release Dynamic Text	釋放動態文字
 	Size is set by Dynamic Text	大小由動態文字決定
+	Leading is set by Line Gap	行距由動態文字的行距決定
 	Word Gap	字距
 	Line Gap	行距
 	Select a type layer	請選擇文字圖層

@@ -2296,6 +2296,17 @@ mod dynamic_text_ui {
     }
 
     #[test]
+    fn greyed_leading_says_line_gap_sets_it() {
+        let (mut app, _) = app_with_box_text("Hello", 12.0);
+        app.run("type.convertToDynamicText", json!({})).unwrap();
+        let mut h = bar(app, true);
+        h.get_by_label_contains("Leading").hover();
+        h.run_steps(20);
+        assert!(h.query_by_label("Leading is set by Line Gap").is_some(), "the Leading field's own tip");
+        assert!(h.query_by_label("Size is set by Dynamic Text").is_none());
+    }
+
+    #[test]
     fn word_gap_slider_goes_down_to_minus_100() {
         let (app, id) = app_with_box_text("Hello there", 12.0);
         let mut h = bar(app, true);

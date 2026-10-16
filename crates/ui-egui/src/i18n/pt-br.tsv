@@ -3983,6 +3983,7 @@ layerLabel	No Color	Sem cor
 	Convert to Dynamic Text	Converter em texto dinâmico
 	Release Dynamic Text	Liberar texto dinâmico
 	Size is set by Dynamic Text	O tamanho é definido pelo texto dinâmico
+	Leading is set by Line Gap	A entrelinha é definida pelo espaço entre linhas
 	Word Gap	Espaço entre palavras
 	Line Gap	Espaço entre linhas
 	Select a type layer	Selecione uma camada de texto

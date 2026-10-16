@@ -3892,6 +3892,7 @@ curves	Smooth	Згладити
 	Convert to Dynamic Text	Перетворити на динамічний текст
 	Release Dynamic Text	Звільнити динамічний текст
 	Size is set by Dynamic Text	Розмір задається динамічним текстом
+	Leading is set by Line Gap	Інтерліньяж задається інтервалом між рядками
 	Word Gap	Інтервал між словами
 	Line Gap	Інтервал між рядками
 	Select a type layer	Виберіть текстовий шар
