@@ -89,6 +89,31 @@ fn sane(v: f32, fallback: f32) -> f32 {
     if v.is_finite() { v } else { fallback }
 }
 
+/// Replaces only invalid (non-finite) sizes and lengths, as [`apply_scale`] does: sizes become
+/// the layer's size (or MIN_PT), a leading becomes auto, shifts, indents and spacing become 0.
+/// Every finite value, the user's base sizes included, is left as it is.
+fn replace_non_finite(layer: &mut TextLayer) {
+    let fallback = sane_fallback(layer);
+    let length = |v: &mut f32| {
+        if !v.is_finite() {
+            *v = 0.0;
+        }
+    };
+    layer.size_pt = sane(layer.size_pt, fallback);
+    for run in &mut layer.runs {
+        let s = &mut run.style;
+        s.size_pt = sane(s.size_pt, fallback);
+        s.leading_pt = s.leading_pt.filter(|v| v.is_finite());
+        length(&mut s.baseline_shift_pt);
+    }
+    for para in &mut layer.paragraphs {
+        let p = &mut para.style;
+        for v in [&mut p.first_line_indent_pt, &mut p.start_indent_pt, &mut p.end_indent_pt, &mut p.space_before_pt, &mut p.space_after_pt] {
+            length(v);
+        }
+    }
+}
+
 /// Multiplies `size_pt` and every run's `size_pt` (and explicit `leading_pt`, `baseline_shift_pt`)
 /// by `scale`, clamping each size to MIN_PT..=MAX_PT. Keeps run ratios except where clamped.
 /// Paragraph indents and spacing scale too (signs kept, so hanging indents stay negative).
@@ -124,6 +149,7 @@ pub fn refit(engine: &mut crate::TextEngine, layer: &mut TextLayer, dpi: f32) ->
         return UNTOUCHED;
     }
     if matches!(layer.shape, TextShape::Box { .. }) {
+        replace_non_finite(layer);
         let solved = solve(engine, layer, dpi);
         if let Some(f) = layer.fit.as_mut() {
             f.lines = solved.lines;
@@ -226,11 +252,7 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
     let mut base = layer.clone();
     base.cache = None;
     base.psd_raw = None;
-    let fallback = sane_fallback(layer);
-    base.size_pt = sane(base.size_pt, fallback);
-    for r in &mut base.runs {
-        r.style.size_pt = sane(r.style.size_pt, fallback);
-    }
+    replace_non_finite(&mut base);
     let fit = base.fit.get_or_insert_with(TextFit::default);
     fit.lines.clear();
 
@@ -1017,5 +1039,24 @@ THREE",
         assert_eq!(r.lines.len(), 5001, "one line per paragraph (the box is too short)");
         assert!(r.probes <= MAX_PROBES && r.layouts <= 1 + REFINE_PASSES, "{} probes, {} layouts", r.probes, r.layouts);
         assert!(r.visited <= 2 * r.lines.len(), "{} base lines visited for {} segments", r.visited, r.lines.len());
+    }
+
+    #[test]
+    fn refit_box_replaces_only_non_finite_sizes() {
+        let mut e = TextEngine::new();
+        let mut t = fit_box("ab cd ef", f32::NAN, 300.0, 200.0);
+        set_run_sizes(&mut t, &[(2, f32::NAN), (3, 30.0), (3, f32::NEG_INFINITY)]);
+        t.runs[1].style.leading_pt = Some(f32::NAN);
+        t.runs[1].style.baseline_shift_pt = f32::INFINITY;
+        refit(&mut e, &mut t, 72.0);
+        assert!(t.size_pt.is_finite() && t.runs.iter().all(|r| r.style.size_pt.is_finite()), "{:?}", t.runs);
+        assert_eq!(t.runs[1].style.size_pt, 30.0, "a valid base size is untouched");
+        assert!(t.runs[1].style.leading_pt.is_none_or(f32::is_finite) && t.runs[1].style.baseline_shift_pt.is_finite());
+        // Valid sizes, even outside the type range, are the user's base: left alone.
+        let mut u = fit_box("ab cd", 12.0, 300.0, 200.0);
+        set_run_sizes(&mut u, &[(2, 2000.0), (3, 0.05)]);
+        let runs = u.runs.clone();
+        refit(&mut e, &mut u, 72.0);
+        assert_eq!(u.runs, runs);
     }
 }
