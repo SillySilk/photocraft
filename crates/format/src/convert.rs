@@ -144,7 +144,7 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
             orientation: t.orientation,
             antialias: t.antialias,
             warp: t.warp.clone(),
-            fit: t.fit,
+            fit: t.fit.map(photocraft_doc::text::TextFit::sanitized),
         },
         LayerContent::Shape(s) => ContentM::Shape {
             fill: s.fill.clone(),

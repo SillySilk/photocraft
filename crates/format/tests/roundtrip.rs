@@ -673,6 +673,23 @@ fn nan_gaps_clamp_on_load() {
     assert!(!fits.is_empty() && fits.iter().all(|f| *f == want));
 }
 
+/// A non-finite gap in memory must not write a file that won't open (JSON has no NaN).
+#[test]
+fn non_finite_gaps_save_as_a_loadable_file() {
+    use photocraft_doc::text::TextFit;
+    let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
+    let ids: Vec<LayerId> = doc.walk().into_iter().filter(|(_, _, l)| matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.id).collect();
+    assert!(!ids.is_empty());
+    for id in ids {
+        if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
+            t.fit = Some(TextFit { word_gap: f32::NAN, line_gap: f32::INFINITY });
+        }
+    }
+    let back = load_from_bytes(&save_to_bytes(&doc, &SaveOptions::default()).unwrap()).unwrap();
+    let fits = text_fits(&back);
+    assert!(!fits.is_empty() && fits.iter().all(|f| *f == Some(TextFit { word_gap: 0.0, line_gap: 0.0 })));
+}
+
 #[test]
 fn channel_restrictions_and_bevel_elements_roundtrip() {
     use photocraft_doc::{Bevel, BevelContour, BevelTexture, Contour, Effect};
