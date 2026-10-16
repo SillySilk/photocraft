@@ -165,6 +165,9 @@ fn release_bakes_without_moving_glyphs() {
     assert_eq!(history_len(&s), before + 1);
     assert!(text(&s, id).fit.is_none());
     let baked = glyphs(&s, id);
+    assert!(!baked.is_empty());
+    let lines = text(&s, id).text.matches('\u{3}').count() + 1;
+    assert!(fitted.len() - baked.len() <= 2 * lines, "{} fitted vs {} baked glyphs, {lines} lines", fitted.len(), baked.len());
     // The fitted layout shapes each line alone and keeps an invisible mark glyph per line.
     let mut from = 0;
     for (i, g) in baked.iter().enumerate() {
@@ -385,7 +388,7 @@ fn psd_export_is_baked() {
             _ => None,
         })
         .expect("type layer");
-    let want = photocraft_text::fit::bake(&mut photocraft_text::shared().lock().unwrap_or_else(|e| e.into_inner()), &text(&s, id), 72.0);
+    let want = photocraft_text::fit::bake(&mut photocraft_text::shared().lock().unwrap_or_else(|e| e.into_inner()), &text(&s, id), 72.0).unwrap();
     assert_eq!(t.text, want.text);
     assert!(t.text.contains('\u{3}'));
     let (got, exp) = (run_sizes(&t), run_sizes(&want));
@@ -441,4 +444,41 @@ fn set_dynamic_text_without_gaps_is_refused() {
         }
     }
     assert_eq!(history_len(&s), before);
+}
+
+#[test]
+fn convert_release_convert_stays_sane() {
+    let (mut s, id) = session_with_box_text("Hello dynamic world of text", 12.0, [0.0, 0.0, 300.0, 150.0]);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    s.execute("type.releaseDynamicText", json!({"layer": id.0})).unwrap();
+    let released = run_sizes(&text(&s, id));
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    // The released text is already as big as the box allows, so refitting it scales by about 1.
+    let t = text(&s, id);
+    let lines = t.fit.as_ref().map(|f| f.lines.clone()).unwrap_or_default();
+    assert!(!lines.is_empty() && lines.iter().all(|l| (l.scale - 1.0).abs() < 0.25), "{lines:?} on {released:?}");
+}
+
+#[test]
+fn release_refuses_a_look_it_cannot_keep() {
+    let (mut s, id) = session_with_box_text("The quick brown fox jumps over the lazy dog", 12.0, [0.0, 0.0, 100.0, 150.0]);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    // A file with one solved line for text far wider than the box.
+    s.edit("bad lines", |doc, _| {
+        if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content)
+            && let Some(f) = t.fit.as_mut()
+        {
+            f.lines = vec![photocraft_doc::text::FitLine { start: 0, scale: 1.0 }];
+        }
+        Ok(())
+    })
+    .unwrap();
+    let before = history_len(&s);
+    let e = s.execute("type.releaseDynamicText", json!({"layer": id.0})).unwrap_err();
+    assert!(matches!(e, EngineError::BadParams { ref cmd, .. } if cmd == "type.releaseDynamicText"), "{e}");
+    assert_eq!(history_len(&s), before);
+    assert!(text(&s, id).fit.is_some());
+    let doc = s.active().unwrap().doc.clone();
+    let r = photocraft_io::export(&doc, "x.psd", &photocraft_io::ExportOptions::default()).unwrap();
+    assert!(r.warnings.iter().any(|w| w.contains("could not be baked")), "{:?}", r.warnings);
 }

@@ -104,7 +104,9 @@ fn release(s: &mut Session, p: &Value) -> Result<Value> {
             t.fit = None;
         } else {
             let mut eng = photocraft_text::shared().lock().unwrap_or_else(|e| e.into_inner());
-            *t = photocraft_text::fit::bake(&mut eng, t, doc.resolution_dpi);
+            let baked = photocraft_text::fit::bake(&mut eng, t, doc.resolution_dpi)
+                .map_err(|m| bad(RELEASE, &format!("the fitted look cannot be kept as ordinary type: {m}")))?;
+            *t = baked;
         }
         Ok(())
     })?;

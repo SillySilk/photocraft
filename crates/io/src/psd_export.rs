@@ -635,12 +635,21 @@ impl Ex {
                 if t.fit.is_some() {
                     self.warnings.push(format!("layer \"{}\": Dynamic Text is saved as regular text", l.name));
                 }
-                let baked = photocraft_text::fit::is_fitted_box(t).then(|| {
+                let baked = if photocraft_text::fit::is_fitted_box(t) {
                     let mut eng = photocraft_text::shared().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let b = photocraft_text::fit::bake(&mut eng, t, self.dpi);
-                    let ink = eng.layout(&b, self.dpi).bounds();
-                    (b, ink)
-                });
+                    match photocraft_text::fit::bake(&mut eng, t, self.dpi) {
+                        Ok(b) => {
+                            let ink = eng.layout(&b, self.dpi).bounds();
+                            Some((b, ink))
+                        }
+                        Err(m) => {
+                            self.warnings.push(format!("layer \"{}\": Dynamic Text could not be baked ({m}); saved with its base sizes", l.name));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 let t = baked.as_ref().map_or(t, |(b, _)| b);
                 // Text layers without PSD data (created here, or baked just now) get a generated TySh.
                 let generated = (baked.is_some() || t.psd_raw.is_none())
