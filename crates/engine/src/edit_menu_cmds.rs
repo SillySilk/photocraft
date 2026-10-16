@@ -901,6 +901,7 @@ fn find_replace(s: &mut Session, p: &Value) -> Result<Value> {
             if count == 0 {
                 return Ok(json!({"count": 0, "layers": 0}));
             }
+            let cmd = crate::type_fit_cmds::guard_cmd(s, "Replace All Text");
             s.edit("Replace All Text", |doc, _| {
                 let snapshot = doc.clone();
                 for (id, matches) in &plan {
@@ -908,6 +909,7 @@ fn find_replace(s: &mut Session, p: &Value) -> Result<Value> {
                         for (a, b) in matches.iter().rev() {
                             crate::type_cmds::replace_text(t, *a, *b, &replace);
                         }
+                        crate::type_fit_cmds::guard_fit(&snapshot, *id, t, cmd)?;
                         crate::type_cmds::refresh(&snapshot, t);
                     }
                 }
@@ -925,10 +927,12 @@ fn find_replace(s: &mut Session, p: &Value) -> Result<Value> {
                 && text_of(&doc, id).is_some_and(|t| find_matches(&t, &find, case, whole).contains(&(a, b)))
             {
                 crate::type_cmds::check_text_unlocked(&doc, id)?;
+                let cmd = crate::type_fit_cmds::guard_cmd(s, "Replace Text");
                 s.edit("Replace Text", |doc, _| {
                     let snapshot = doc.clone();
                     if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
                         crate::type_cmds::replace_text(t, a, b, &replace);
+                        crate::type_fit_cmds::guard_fit(&snapshot, id, t, cmd)?;
                         crate::type_cmds::refresh(&snapshot, t);
                     }
                     Ok(())

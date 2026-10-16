@@ -4264,6 +4264,7 @@ shape	Appearance	Izgled
 	Convert to Dynamic Text	Претвори у динамички текст
 	Release Dynamic Text	Ослободи динамички текст
 	Size is set by Dynamic Text	Величину одређује динамички текст
+	Leading is set by Line Gap	Проред одређује размак између редова
 	Word Gap	Размак између речи
 	Line Gap	Размак између редова
 	Preview unavailable:	Pregled nije dostupan:

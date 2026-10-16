@@ -1836,6 +1836,23 @@ fn dynamic_text_unavailable(app: &PhotocraftApp) -> Option<&'static str> {
     photocraft_engine::type_fit_cmds::fit_refusal(t).map(|_| tl!("Not available for vertical, right-to-left or path text"))
 }
 
+/// The Dynamic Text toggle wired to Convert / Release Dynamic Text on the target layer. The
+/// options bar and the Properties type section both show it, as in Photoshop.
+fn dynamic_text_toggle(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let fitted = is_fitted(app);
+    let unavailable = dynamic_text_unavailable(app);
+    if dynamic_text_button(ui, fitted, unavailable).clicked()
+        && unavailable.is_none()
+        && let Some((layer, _)) = target(app)
+    {
+        let cmd = if fitted { "type.releaseDynamicText" } else { "type.convertToDynamicText" };
+        if let Err(e) = app.run(cmd, json!({ "layer": layer })) {
+            app.ui.status = e;
+            app.ui.status_error = true;
+        }
+    }
+}
+
 /// Photoshop's Type options bar.
 pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = crate::theme::Tokens::get(ui.ctx());
@@ -1892,17 +1909,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         app.ui.tool_options.type_size = size;
         apply(app, ui.ctx(), json!({"size": size, "metricsAsShown": true}));
     }
-    let unavailable = dynamic_text_unavailable(app);
-    if dynamic_text_button(ui, fitted, unavailable).clicked()
-        && unavailable.is_none()
-        && let Some((layer, _)) = target(app)
-    {
-        let cmd = if fitted { "type.releaseDynamicText" } else { "type.convertToDynamicText" };
-        if let Err(e) = app.run(cmd, json!({ "layer": layer })) {
-            app.ui.status = e;
-            app.ui.status_error = true;
-        }
-    }
+    dynamic_text_toggle(app, ui);
     let mut aa = target(app)
         .and_then(|(id, _)| app.session.active().and_then(|st| text_layer(&st.doc, LayerId(id))))
         .map(|t| photocraft_engine::type_extra_cmds::aa_name(t.antialias).to_string())
@@ -2117,10 +2124,11 @@ fn dynamic_text_gaps(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 
 /// Labelled numeric field (Photoshop's icon + value pairs). Returns the new value when edited.
 fn num_field(ui: &mut egui::Ui, label: &str, tip: &str, v: f32, range: std::ops::RangeInclusive<f32>, unit: &str, width: f32) -> Option<f32> {
-    num_field_enabled(ui, label, tip, v, range, unit, width, true)
+    num_field_enabled(ui, label, tip, v, range, unit, width, None)
 }
 
-/// [`num_field`] that can be greyed out. A disabled field says Dynamic Text sets the value.
+/// [`num_field`] that can be greyed out: `disabled` is the (translated) tip saying what sets the
+/// value instead, `None` keeps the field editable.
 #[allow(clippy::too_many_arguments)]
 fn num_field_enabled(
     ui: &mut egui::Ui,
@@ -2130,8 +2138,9 @@ fn num_field_enabled(
     range: std::ops::RangeInclusive<f32>,
     unit: &str,
     width: f32,
-    enabled: bool,
+    disabled: Option<&str>,
 ) -> Option<f32> {
+    let enabled = disabled.is_none();
     let t = crate::theme::Tokens::get(ui.ctx());
     let mut v = v;
     let mut out = None;
@@ -2146,8 +2155,8 @@ fn num_field_enabled(
             info.label = Some(tl!(tip).to_owned());
             info
         });
-        if !enabled {
-            response.on_disabled_hover_text(tl!("Size is set by Dynamic Text"));
+        if let Some(why) = disabled {
+            response.on_disabled_hover_text(why);
         } else if response.changed() {
             out = Some(v);
         }
@@ -2362,15 +2371,18 @@ fn type_sections(app: &mut PhotocraftApp, ui: &mut egui::Ui, character: bool, pa
             let k = shown_scale(app);
             // Hover tips stay English until wired through `tl!` in a multi-locale change
             // (`every_tl_literal_is_translated` requires every complete catalog).
-            if let Some(v) = num_field_enabled(ui, "tT", "Font size", c.size_pt * k, 0.1..=1296.0, "pt", w, !fitted) {
+            let size_tip = fitted.then(|| tl!("Size is set by Dynamic Text"));
+            if let Some(v) = num_field_enabled(ui, "tT", "Font size", c.size_pt * k, 0.1..=1296.0, "pt", w, size_tip) {
                 app.ui.tool_options.type_size = v;
                 apply(app, ui.ctx(), json!({"size": v, "metricsAsShown": true}));
             }
             let lead = c.leading_pt.unwrap_or(c.size_pt * para.auto_leading.max(0.01)) * k;
-            if let Some(v) = num_field_enabled(ui, "A↕", "Leading (set to the font size × auto-leading when Auto)", lead, 0.1..=5000.0, "pt", w, !fitted) {
+            let lead_tip = fitted.then(|| tl!("Leading is set by Line Gap"));
+            if let Some(v) = num_field_enabled(ui, "A↕", "Leading (set to the font size × auto-leading when Auto)", lead, 0.1..=5000.0, "pt", w, lead_tip) {
                 apply(app, ui.ctx(), json!({"leading": v, "metricsAsShown": true}));
             }
         });
+        row(ui, &mut |ui| dynamic_text_toggle(app, ui));
         dynamic_text_gaps(app, ui);
         row(ui, &mut |ui| {
             let shown = kerning_label(kerning_at(app).unwrap_or((c.kerning, c.kern)));

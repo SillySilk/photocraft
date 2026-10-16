@@ -3892,6 +3892,7 @@ curves	Smooth	Εξομάλυνση
 	Convert to Dynamic Text	Μετατροπή σε δυναμικό κείμενο
 	Release Dynamic Text	Αποδέσμευση δυναμικού κειμένου
 	Size is set by Dynamic Text	Το μέγεθος καθορίζεται από το δυναμικό κείμενο
+	Leading is set by Line Gap	Το διάστιχο καθορίζεται από το κενό γραμμών
 	Word Gap	Κενό λέξεων
 	Line Gap	Κενό γραμμών
 	Preview unavailable:	Η προεπισκόπηση δεν είναι διαθέσιμη:

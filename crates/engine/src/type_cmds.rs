@@ -561,6 +561,7 @@ pub(crate) fn check_text_unlocked(doc: &Document, id: LayerId) -> Result<()> {
 fn with_text_layer<R>(s: &mut Session, p: &Value, label: &str, f: impl FnOnce(&mut TextLayer, &Document, &mut Option<String>) -> Result<R>) -> Result<R> {
     let id = layer_id(s, p)?;
     check_text_unlocked(&s.active().ok_or(EngineError::NoDocument)?.doc, id)?;
+    let cmd = crate::type_fit_cmds::guard_cmd(s, label);
     let (r, damage) = s.edit(label, |doc, _| {
         let snapshot = doc.clone();
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
@@ -571,6 +572,7 @@ fn with_text_layer<R>(s: &mut Session, p: &Value, label: &str, f: impl FnOnce(&m
         let before = t.cache.as_ref().map(|c| c.tile_bounds());
         let mut rename = None;
         let r = f(t, &snapshot, &mut rename)?;
+        crate::type_fit_cmds::guard_fit(&snapshot, id, t, cmd)?;
         refresh(&snapshot, t);
         // Only this layer's pixels changed: the canvas recomposites their old and new area
         // instead of the whole document (#124). Unknown old pixels mean a full refresh.
@@ -633,6 +635,7 @@ pub(crate) fn with_text_targets(
     mut f: impl FnMut(&mut TextLayer, (usize, usize)) -> Result<()>,
 ) -> Result<Vec<LayerId>> {
     let ids = format_targets(s, p)?;
+    let cmd = crate::type_fit_cmds::guard_cmd(s, label);
     let damage = s.edit(label, |doc, _| {
         let snapshot = doc.clone();
         let mut damage = Some(photocraft_geom::Rect::EMPTY);
@@ -641,6 +644,7 @@ pub(crate) fn with_text_targets(
             let before = t.cache.as_ref().map(|c| c.tile_bounds());
             let range = if p.get("layers").is_none() || p.get("layer").is_some() { range_param(&t.text, p) } else { (0, t.text.len()) };
             f(t, range)?;
+            crate::type_fit_cmds::guard_fit(&snapshot, *id, t, cmd)?;
             refresh(&snapshot, t);
             // An unknown old/new cache retains Session.edit's full-refresh fallback.
             damage = damage.zip(before).zip(t.cache.as_ref().map(|c| c.tile_bounds())).map(|((all, a), b)| all.union(&a).union(&b));
@@ -957,9 +961,6 @@ pub fn specs() -> Vec<CommandSpec> {
                 check_kerning(p).map_err(|m| bad("type.setStyle", m))?;
                 check_steps(p).map_err(|m| bad("type.setStyle", m))?;
                 let ids = with_text_targets(s, p, "Set Type Style", |t, (a, b)| {
-                    if t.fit.is_some() && p.get("direction").and_then(Value::as_str) == Some("rtl") {
-                        return Err(bad("type.setStyle", "Release Dynamic Text first"));
-                    }
                     let props = shown_style_params(t, p)?;
                     check_size_tracking(&props).map_err(|m| bad("type.setStyle", m))?;
                     let mut probe = CharStyle::default();

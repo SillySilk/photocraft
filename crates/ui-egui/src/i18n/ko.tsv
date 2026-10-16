@@ -3371,6 +3371,7 @@ curves	Smooth	매끄럽게
 	Convert to Dynamic Text	다이내믹 텍스트로 변환
 	Release Dynamic Text	다이내믹 텍스트 해제
 	Size is set by Dynamic Text	크기는 다이내믹 텍스트가 결정합니다
+	Leading is set by Line Gap	행간은 줄 간격이 결정합니다
 	Word Gap	단어 간격
 	Line Gap	줄 간격
 	Preview unavailable:	미리 볼 수 없음:

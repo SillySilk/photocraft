@@ -3790,6 +3790,7 @@ curves	Smooth	Wygładź
 	Convert to Dynamic Text	Konwertuj na tekst dynamiczny
 	Release Dynamic Text	Zwolnij tekst dynamiczny
 	Size is set by Dynamic Text	Rozmiar jest ustalany przez tekst dynamiczny
+	Leading is set by Line Gap	Interlinia jest ustalana przez odstęp między wierszami
 	Word Gap	Odstęp między wyrazami
 	Line Gap	Odstęp między wierszami
 	Preview unavailable:	Podgląd niedostępny:

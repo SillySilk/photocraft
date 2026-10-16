@@ -155,7 +155,7 @@ fn data_sets(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// Apply one data set's values to the document (visibility, text, pixels). A history step.
-fn apply_to_doc(doc: &mut Document, vars: &Variables, set: &DataSet) -> Result<()> {
+fn apply_to_doc(doc: &mut Document, vars: &Variables, set: &DataSet, cmd: &str) -> Result<()> {
     for dv in &set.values {
         let Some(def) = vars.def(&dv.variable) else { continue };
         match (&def.kind, &dv.value) {
@@ -178,6 +178,7 @@ fn apply_to_doc(doc: &mut Document, vars: &Variables, set: &DataSet) -> Result<(
                     t.runs = vec![TextRun { len: t.text.len(), style }];
                     t.paragraphs = vec![ParagraphRun { len: t.text.len(), style: para }];
                     t.sync_summary();
+                    crate::type_fit_cmds::guard_fit(&snapshot, def.layer, t, cmd)?;
                     // The compositor draws a type layer from its cache: clearing it left the
                     // layer blank until some other edit re-rendered it (#990).
                     crate::type_cmds::refresh(&snapshot, t);
@@ -252,7 +253,7 @@ fn apply_data_set(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
-    s.edit(&format!("Apply Data Set \"{}\"", set.name), |doc, _| apply_to_doc(doc, &vars, &set))?;
+    s.edit(&format!("Apply Data Set \"{}\"", set.name), |doc, _| apply_to_doc(doc, &vars, &set, "image.applyDataSet"))?;
     set_vars(s, |v| v.active = Some(idx))?;
     Ok(json!({"applied": set.name, "index": idx}))
 }
@@ -427,7 +428,7 @@ pub fn export_data_sets_with(s: &Session, p: &Value, mut write: impl FnMut(&str,
     let mut written = Vec::new();
     for (set, name) in sets.iter().zip(&names) {
         let mut doc = (*original).clone();
-        apply_to_doc(&mut doc, &vars, set)?;
+        apply_to_doc(&mut doc, &vars, set, "file.export.dataSetsAsFiles")?;
         let opts = photocraft_io::ExportOptions::default();
         let bytes = photocraft_io::export(&doc, format, &opts).map(|r| r.bytes).map_err(|e| EngineError::Other(format!("export `{}`: {e}", set.name)))?;
         write(name, &bytes)?;

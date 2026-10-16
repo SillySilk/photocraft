@@ -217,14 +217,15 @@ pub struct TextLayout {
     pub px_per_pt: f32,
     /// Vertical type: line space is turned 90° clockwise into text space.
     pub vertical: bool,
-    /// Box or area text that doesn't fit: [`Self::hidden`], or a line too wide for its width: a line's shaped advance, without trailing whitespace,
-    /// is more than 0.5 px wider than the width it was broken at (box or span less indents,
-    /// and on a paragraph's first line less the first-line indent). Horizontal scale and manual
-    /// or optical kerning are applied after line breaking and never count: lines they push past
-    /// the edge are drawn as before but not flagged. A solved Dynamic Text box line counts by its
-    /// visible width (`x1 - x0`, scale and kerning included), as the solver sizes it, so one that
-    /// clamping left wider than the box counts as too wide. Always false for point and path text.
-    /// Dynamic Text's uniform fit uses it as its "too big" test.
+    /// Box or area text that doesn't fit: [`Self::hidden`], or a line too wide for its width.
+    /// A line is too wide when its shaped advance, without trailing whitespace, is more than
+    /// 0.5 px wider than the width it was broken at (box or span less indents, and on a
+    /// paragraph's first line less the first-line indent). Horizontal scale and manual or
+    /// optical kerning are applied after line breaking and never count: lines they push past
+    /// the edge are drawn as before but not flagged. A solved Dynamic Text box line counts by
+    /// its visible width (`x1 - x0`, scale and kerning included), as the solver sizes it, so
+    /// one that clamping left wider than the box counts as too wide. Always false for point and
+    /// path text. Dynamic Text's uniform fit uses it as its "too big" test.
     pub overflowed: bool,
     /// Text other than line and paragraph breaks is hidden: the box height or area shape ran out
     /// (an empty last paragraph below the box doesn't count). Implies `overflowed`. Always false
@@ -1221,8 +1222,9 @@ fn break_units(text: &str, lines: &[FitLine]) -> Vec<Unit> {
 }
 
 /// Whether the first strong character of `s` is right-to-left (UAX #9 P2, without isolates), or
-/// `None` when it has none.
-fn first_strong_rtl(s: &str) -> Option<bool> {
+/// `None` when it has none. Dynamic Text uses it to refuse Auto-direction paragraphs that lay out
+/// right to left.
+pub fn first_strong_rtl(s: &str) -> Option<bool> {
     use icu_properties::{CodePointMapData, props::BidiClass};
     let classes = CodePointMapData::<BidiClass>::new();
     s.chars().find_map(|c| match classes.get(c) {

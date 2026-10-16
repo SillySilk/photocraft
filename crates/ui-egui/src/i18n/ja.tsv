@@ -3868,6 +3868,7 @@ curves	Smooth	スムーズ
 	Convert to Dynamic Text	ダイナミックテキストに変換
 	Release Dynamic Text	ダイナミックテキストを解除
 	Size is set by Dynamic Text	サイズはダイナミックテキストによって決まります
+	Leading is set by Line Gap	行送りは行の間隔によって決まります
 	Word Gap	単語の間隔
 	Line Gap	行の間隔
 	Preview unavailable:	プレビューを表示できません:

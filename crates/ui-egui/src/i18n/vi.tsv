@@ -3677,6 +3677,7 @@ curves	Smooth	Làm mượt
 	Convert to Dynamic Text	Chuyển thành văn bản động
 	Release Dynamic Text	Gỡ văn bản động
 	Size is set by Dynamic Text	Kích thước do văn bản động quyết định
+	Leading is set by Line Gap	Giãn dòng do khoảng cách dòng quyết định
 	Word Gap	Khoảng cách từ
 	Line Gap	Khoảng cách dòng
 	Preview unavailable:	Không có bản xem trước:

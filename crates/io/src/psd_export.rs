@@ -632,9 +632,7 @@ impl Ex {
                 // Photoshop's own Dynamic Text data is not known: the layer saves as the plain type
                 // it bakes to (a size and a line break per line). Stored TySh data of a fitted box
                 // is from before the bake, so it is regenerated.
-                if t.fit.is_some() {
-                    self.warnings.push(format!("layer \"{}\": Dynamic Text is saved as regular text", l.name));
-                }
+                // One warning per fitted layer: how it was saved, or why it could not be baked.
                 let baked = if photocraft_text::fit::is_fitted_box(t) {
                     let mut eng = photocraft_text::shared().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     match photocraft_text::fit::bake(&mut eng, t, self.dpi) {
@@ -642,14 +640,17 @@ impl Ex {
                             let ink = eng.layout(&b, self.dpi).bounds();
                             Some((b, ink))
                         }
-                        Err(m) => {
-                            self.warnings.push(format!("layer \"{}\": Dynamic Text could not be baked ({m}); saved with its base sizes", l.name));
+                        Err(e) => {
+                            self.warnings.push(format!("layer \"{}\": Dynamic Text could not be baked: {e}; saved with its base sizes", l.name));
                             None
                         }
                     }
                 } else {
                     None
                 };
+                if t.fit.is_some() && (baked.is_some() || !photocraft_text::fit::is_fitted_box(t)) {
+                    self.warnings.push(format!("layer \"{}\": Dynamic Text is saved as regular text", l.name));
+                }
                 let t = baked.as_ref().map_or(t, |(b, _)| b);
                 // Text layers without PSD data (created here, or baked just now) get a generated TySh.
                 let generated = (baked.is_some() || t.psd_raw.is_none())
