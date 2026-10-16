@@ -298,8 +298,8 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
         shrink(&segs, &lines, &mut scales, &mut target, f);
     }
 
-    // 5. Exact widths: lay the chosen lines out and correct each scale by the advance layout
-    // measures (kerning, optical sizes), and the whole block by its measured height. The scales
+    // 5. Exact widths: lay the chosen lines out and correct each scale by the visible width
+    // layout measures (kerning, horizontal scale, optical sizes), and the whole block by its measured height. The scales
     // returned are the ones last laid out.
     let starts: Vec<u32> = lines.iter().map(|c| line_start(&segs, c) as u32).collect();
     let mut fits = true;
@@ -319,7 +319,8 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
             // Layout lines come in the order of the solved lines; a hidden one is missing.
             let Some(off) = out.lines.get(at..).and_then(|ls| ls.iter().position(|l| l.range.start == starts[i] as usize)) else { continue };
             at += off;
-            let advance = out.lines[at].advance;
+            // The visible width: horizontal scale and manual or optical kerning included.
+            let advance = out.lines[at].x1 - out.lines[at].x0;
             if c.first >= c.end || advance <= 0.0 || (advance - target[i]).abs() <= WIDTH_EPS {
                 continue;
             }
@@ -972,5 +973,20 @@ THREE",
         assert!((w[0] - 340.0).abs() <= 1.5, "first line takes the first-line indent: {w:?}");
         assert!(w[1..].iter().all(|v| (v - 370.0).abs() <= 1.5), "{w:?}");
         assert!(!l.overflowed);
+    }
+
+    #[test]
+    fn horizontal_scale_and_kerning_lines_span_the_visible_width() {
+        let mut e = TextEngine::new();
+        for (hs, kern) in [(1.5, 40.0), (0.8, -30.0)] {
+            let mut t = fit_box(FOX, 12.0, 400.0, 300.0);
+            set_run_sizes(&mut t, &[(FOX.len(), 12.0)]);
+            t.runs[0].style.horizontal_scale = hs;
+            t.runs[0].style.kern = kern;
+            let (t, l) = solved(&mut e, t);
+            assert!(scales(&t).len() >= 2, "{:?}", scales(&t));
+            assert_spans(&l, 400.0);
+            assert!(!l.overflowed, "hs {hs} kern {kern}: solved lines aren't flagged too wide");
+        }
     }
 }

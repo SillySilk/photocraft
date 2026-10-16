@@ -187,9 +187,6 @@ pub struct LineInfo {
     /// Visual extent along the baseline.
     pub x0: f32,
     pub x1: f32,
-    /// Parley's advance of the line without trailing whitespace, before horizontal scale and
-    /// manual or optical kerning: the width line breaking and the too-wide test measure.
-    pub advance: f32,
     pub ascent: f32,
     pub descent: f32,
     pub paragraph: usize,
@@ -224,8 +221,9 @@ pub struct TextLayout {
     /// is more than 0.5 px wider than the width it was broken at (box or span less indents,
     /// and on a paragraph's first line less the first-line indent). Horizontal scale and manual
     /// or optical kerning are applied after line breaking and never count: lines they push past
-    /// the edge are drawn as before but not flagged. A solved Dynamic Text box line that clamping
-    /// left wider than the box counts as too wide. Always false for point and path text.
+    /// the edge are drawn as before but not flagged. A solved Dynamic Text box line counts by its
+    /// visible width (`x1 - x0`, scale and kerning included), as the solver sizes it, so one that
+    /// clamping left wider than the box counts as too wide. Always false for point and path text.
     /// Dynamic Text's uniform fit uses it as its "too big" test.
     pub overflowed: bool,
     /// Text other than line and paragraph breaks is hidden: the box height or area shape ran out
@@ -1136,14 +1134,16 @@ impl Layouter {
                 let x1 = x0 + adv + extra - trailing_tabs;
                 // A word too long to wrap: parley's own line advance (before horizontal scale and
                 // kerning, which it doesn't see) is wider than the width it broke the line at,
-                // which on a paragraph's first line has the first-line indent taken off.
+                // which on a paragraph's first line has the first-line indent taken off. A solved
+                // Dynamic Text line was sized by its visible width, so that is what counts.
+                let measured = if solved { x1 - x0 } else { adv };
                 if let Some(w) = line_avail
-                    && adv > w - if li == 0 { first_indent } else { 0.0 } + 0.5
+                    && measured > w - if li == 0 { first_indent } else { 0.0 } + 0.5
                 {
                     out.overflowed = true;
                 }
                 shown_end = shown_end.max(map(lr.end));
-                out.lines.push(LineInfo { range: map(lr.start)..map(lr.end).min(content_end), baseline, x0, x1, advance: adv, ascent, descent, paragraph: pi });
+                out.lines.push(LineInfo { range: map(lr.start)..map(lr.end).min(content_end), baseline, x0, x1, ascent, descent, paragraph: pi });
             }
             if area_full {
                 // The shape is full: the rest of this paragraph and later ones are hidden.
