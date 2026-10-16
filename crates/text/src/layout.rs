@@ -187,6 +187,9 @@ pub struct LineInfo {
     /// Visual extent along the baseline.
     pub x0: f32,
     pub x1: f32,
+    /// Parley's advance of the line without trailing whitespace, before horizontal scale and
+    /// manual or optical kerning: the width line breaking and the too-wide test measure.
+    pub advance: f32,
     pub ascent: f32,
     pub descent: f32,
     pub paragraph: usize,
@@ -1140,7 +1143,7 @@ impl Layouter {
                     out.overflowed = true;
                 }
                 shown_end = shown_end.max(map(lr.end));
-                out.lines.push(LineInfo { range: map(lr.start)..map(lr.end).min(content_end), baseline, x0, x1, ascent, descent, paragraph: pi });
+                out.lines.push(LineInfo { range: map(lr.start)..map(lr.end).min(content_end), baseline, x0, x1, advance: adv, ascent, descent, paragraph: pi });
             }
             if area_full {
                 // The shape is full: the rest of this paragraph and later ones are hidden.

@@ -2251,12 +2251,15 @@ mod dynamic_text_ui {
         h.get_by_label("Dynamic Text").click();
         h.run_steps(3);
         assert!(fitted(&h, id));
-        let size = text(h.state(), id).size_pt;
-        assert!(size > 12.0, "fills the box: {size}");
+        // Box text keeps its base size; its solved line is scaled up to fill the box.
+        let t = text(h.state(), id);
+        let scale = t.fit.as_ref().and_then(|f| f.lines.first()).map_or(0.0, |l| l.scale);
+        assert!(t.size_pt == 12.0 && scale > 1.0, "fills the box: {} x {scale}", t.size_pt);
         h.get_by_label("Dynamic Text").click();
         h.run_steps(3);
         assert!(!fitted(&h, id));
-        assert_eq!(text(h.state(), id).size_pt, size, "release keeps the fitted size");
+        // Release baking the solved sizes into runs is spec step 10, a later task.
+        assert_eq!(text(h.state(), id).size_pt, 12.0, "release keeps the base size");
     }
 
     #[test]

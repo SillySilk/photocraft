@@ -2856,20 +2856,24 @@ mod tests {
         insert(&mut app, "Hello there friend");
         let id = LayerId(app.ui.text_edit.as_ref().unwrap().layer);
         app.run("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+        // Box Dynamic Text keeps its base size; the solved lines carry each line's scale.
+        let lines = |app: &PhotocraftApp| text_layer(&app.session.active().unwrap().doc, id).unwrap().fit.as_ref().unwrap().lines.clone();
         let size = |app: &PhotocraftApp| text_layer(&app.session.active().unwrap().doc, id).unwrap().size_pt;
-        let size0 = size(&app);
+        let (size0, lines0) = (size(&app), lines(&app));
+        assert!(!lines0.is_empty());
         let before = app.session.active().unwrap().history.entries().len();
         // The right edge's middle handle, dragged 100 px narrower in several moves.
         assert!(pointer_down(&mut app, 190.0, 55.0, egui::Modifiers::NONE));
-        let mut last = size0;
+        let mut last = lines0.clone();
         for x in [170.0, 150.0, 120.0, 90.0] {
             pointer_move(&mut app, x, 55.0);
-            let now = size(&app);
-            assert!(now <= last, "refits live: {last} -> {now}");
+            let now = lines(&app);
+            assert!(!now.is_empty() && now != last, "refits live: {last:?} -> {now:?}");
             last = now;
         }
         pointer_up(&mut app, [190.0, 55.0], [90.0, 55.0]);
-        assert!(size(&app) < size0, "{size0} -> {}", size(&app));
+        assert_ne!(lines(&app), lines0);
+        assert_eq!(size(&app), size0, "the base size is kept");
         assert_eq!(app.session.active().unwrap().history.entries().len(), before + 1);
     }
 

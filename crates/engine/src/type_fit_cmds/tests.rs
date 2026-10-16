@@ -1,5 +1,5 @@
 use super::*;
-use photocraft_doc::text::{TextFit, TextShape};
+use photocraft_doc::text::TextShape;
 use photocraft_doc::vector::{Path, Subpath};
 use photocraft_doc::{LayerContent, LayerId, TextLayer};
 use serde_json::json;
@@ -33,6 +33,15 @@ fn text(s: &Session, id: LayerId) -> TextLayer {
     }
 }
 
+/// Largest and smallest effective type size of a solved Dynamic Text box (base size × line
+/// scale). Box text keeps its base size; each solved line carries its own scale.
+fn effective(s: &Session, id: LayerId) -> (f32, f32) {
+    let t = text(s, id);
+    let lines = t.fit.as_ref().map(|f| f.lines.clone()).unwrap_or_default();
+    assert!(!lines.is_empty(), "solved lines: {:?}", t.fit);
+    lines.iter().map(|l| t.size_pt * l.scale).fold((f32::MIN, f32::MAX), |(hi, lo), v| (hi.max(v), lo.min(v)))
+}
+
 fn history_len(s: &Session) -> usize {
     s.active().unwrap().history.entries().len()
 }
@@ -50,7 +59,8 @@ fn convert_fits_box_text_in_one_step() {
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
     assert_eq!(history_len(&s), before + 1);
     let t = text(&s, id);
-    assert!(t.fit.is_some() && t.size_pt > 12.0, "fills the big box: {}", t.size_pt);
+    assert!(t.fit.is_some() && t.size_pt == 12.0, "base size kept: {}", t.size_pt);
+    assert!(effective(&s, id).1 > 12.0, "fills the big box: {:?}", effective(&s, id));
     assert!(!s.is_enabled("type.convertToDynamicText"), "already Dynamic Text");
     assert!(s.is_enabled("type.releaseDynamicText") && s.is_enabled("type.setDynamicText"));
     // Converting twice is refused without a history step.
@@ -89,24 +99,24 @@ fn area_text_fits() {
 fn typing_refits_and_stays_bounded() {
     let (mut s, id) = session_with_box_text("Hi", 12.0, [0.0, 0.0, 200.0, 80.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
-    let big = text(&s, id).size_pt;
+    let big = effective(&s, id).0;
     s.execute("type.edit", json!({"layer": id.0, "text": "Hi ".repeat(400)})).unwrap();
-    let small = text(&s, id).size_pt;
-    assert!(small < big && small >= photocraft_text::fit::MIN_PT - 1e-4, "{big} -> {small}");
+    let (small, smallest) = effective(&s, id);
+    assert!(small < big && smallest >= photocraft_text::fit::MIN_PT - 1e-4, "{big} -> {small}");
 }
 
 #[test]
 fn resize_then_undo_restores_box_and_size() {
     let (mut s, id) = session_with_box_text("Hello there", 12.0, [0.0, 0.0, 300.0, 100.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
-    let (shape0, size0) = (text(&s, id).shape.clone(), text(&s, id).size_pt);
+    let (shape0, fit0, size0) = (text(&s, id).shape.clone(), text(&s, id).fit, effective(&s, id).0);
     let before = history_len(&s);
     s.execute("type.edit", json!({"layer": id.0, "box": [0.0, 0.0, 120.0, 100.0]})).unwrap();
     assert_eq!(history_len(&s), before + 1);
-    assert!(text(&s, id).size_pt < size0);
+    assert!(effective(&s, id).0 < size0);
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(text(&s, id).shape, shape0);
-    assert!((text(&s, id).size_pt - size0).abs() < 1e-4);
+    assert_eq!(text(&s, id).fit, fit0, "box and solved lines come back in one step");
 }
 
 #[test]
@@ -144,13 +154,14 @@ fn gaps_validate_and_apply() {
         assert!(matches!(e, EngineError::BadParams { ref cmd, .. } if cmd == "type.setDynamicText"), "{bad}: {e}");
     }
     assert_eq!(history_len(&s), before);
-    assert_eq!(text(&s, id).fit, Some(TextFit::default()));
+    let gaps = |s: &Session| text(s, id).fit.map(|f| (f.word_gap, f.line_gap));
+    assert_eq!(gaps(&s), Some((0.0, 0.0)));
     s.execute("type.setDynamicText", json!({"layer": id.0, "lineGap": 50})).unwrap();
     assert_eq!(history_len(&s), before + 1);
     assert_eq!(text(&s, id).fit.unwrap().line_gap, 50.0);
     assert_eq!(text(&s, id).fit.unwrap().word_gap, 0.0, "unspecified gap kept");
     s.execute("type.setDynamicText", json!({"layer": id.0, "wordGap": -50, "lineGap": 200})).unwrap();
-    assert_eq!(text(&s, id).fit, Some(TextFit { word_gap: -50.0, line_gap: 200.0, lines: vec![] }));
+    assert_eq!(gaps(&s), Some((-50.0, 200.0)));
     // Word gap goes down to -100, line gap only to -50; each error names its own range.
     s.execute("type.setDynamicText", json!({"layer": id.0, "wordGap": -100, "lineGap": -50})).unwrap();
     assert_eq!(text(&s, id).fit.unwrap().word_gap, -100.0);
@@ -165,9 +176,9 @@ fn bigger_line_gap_shrinks_the_fit() {
     let words = "one two three four five six seven eight nine ten eleven twelve";
     let (mut s, id) = session_with_box_text(words, 12.0, [0.0, 0.0, 200.0, 200.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
-    let size0 = text(&s, id).size_pt;
+    let size0 = effective(&s, id).0;
     s.execute("type.setDynamicText", json!({"layer": id.0, "lineGap": 200})).unwrap();
-    assert!(text(&s, id).size_pt < size0, "{size0} -> {}", text(&s, id).size_pt);
+    assert!(effective(&s, id).0 < size0, "{size0} -> {:?}", effective(&s, id));
 }
 
 #[test]
