@@ -556,19 +556,36 @@ impl Layouter {
             _ => &[],
         };
         let solved = !fit_lines.is_empty();
+        // Per paragraph, shared by its units: its index, the font fallback stack and, for a
+        // paragraph split into solved lines, its first strong direction.
+        let mut para_cache: Option<(usize, Vec<String>, Option<bool>)> = None;
         for unit in break_units(text, fit_lines) {
             if stop {
                 break;
             }
             let (pi, prange, content_end) = (unit.paragraph, unit.range.clone(), unit.content_end);
             let ps = para_style_at(prange.start).clone();
+            if para_cache.as_ref().is_none_or(|c| c.0 != pi) {
+                let ptext_all = text.get(unit.paragraph_text.clone()).unwrap_or("");
+                // Scripts the loaded fonts may lack (Arabic, Japanese, …): a host serving a font
+                // for them fetches it (`served`); it joins the fallback stack once it arrives.
+                crate::served::request_for_text(ptext_all);
+                let fallback = fonts.fallback_stack().map(str::to_string).collect();
+                let split = !(unit.first && unit.last);
+                let rtl = if split && ps.direction == TextDirection::Auto { first_strong_rtl(ptext_all) } else { None };
+                para_cache = Some((pi, fallback, rtl));
+            }
+            let Some((_, fallback, para_rtl)) = para_cache.as_ref() else { continue };
+            // The runs that can touch this unit: from the one at its start to the last starting
+            // before its end.
+            let first_run = style_at(prange.start);
+            let unit_runs = first_run..run_starts.partition_point(|&s| s < content_end).max(first_run + 1).min(runs.len());
             // This unit's style for each run: its own, or for a solved line not at scale 1, a copy
             // at that line's scale (appended to `out.styles`, so render reads the scaled baseline
-            // shift). Only runs the unit touches are copied.
+            // shift). Only runs the unit touches are copied; `unit_style[i]` is run `first_run + i`.
             let mut unit_style: Vec<usize> = Vec::new();
             if unit.scale != 1.0 {
-                let first_run = style_at(prange.start);
-                for ri in 0..runs.len() {
+                for ri in unit_runs.clone() {
                     let (rs, re) = (run_starts[ri], run_starts[ri] + runs[ri].len);
                     let touches = ri == first_run || (rs < content_end && re > prange.start);
                     unit_style.push(if touches {
@@ -580,17 +597,16 @@ impl Layouter {
                     });
                 }
             }
-            let sst = |ri: usize| unit_style.get(ri).copied().unwrap_or(ri);
+            let sst = |ri: usize| ri.checked_sub(first_run).and_then(|i| unit_style.get(i)).copied().unwrap_or(ri);
             let content = &text[prange.start..content_end];
             let prefix = match ps.direction {
                 // A paragraph split into solved lines keeps the direction of its first strong
                 // character: parley would otherwise detect it again on each line.
-                TextDirection::Auto if !(unit.first && unit.last) => match text.get(unit.paragraph_text.clone()).and_then(first_strong_rtl) {
+                TextDirection::Auto => match para_rtl {
                     Some(true) => RLM,
                     Some(false) => LRM,
                     None => "",
                 },
-                TextDirection::Auto => "",
                 TextDirection::Ltr => LRM,
                 TextDirection::Rtl => RLM,
             };
@@ -636,10 +652,6 @@ impl Layouter {
             }
             let first_style = &out.styles[sst(style_at(prange.start))];
             let first_px = first_style.size_pt * k;
-            // Scripts the loaded fonts may lack (Arabic, Japanese, …): a host serving a font for them
-            // fetches it (`served`); it joins the fallback stack once it arrives.
-            crate::served::request_for_text(&ptext);
-            let fallback: Vec<String> = fonts.fallback_stack().map(str::to_string).collect();
             // Shapes the paragraph, each tab widened by its letter spacing in `tab_spacing` (px).
             let build = |lcx: &mut LayoutContext<RunBrush>, fcx: &mut parley::FontContext, tab_spacing: &[f32]| -> Layout<RunBrush> {
                 let mut b = lcx.ranged_builder(fcx, &ptext, 1.0, false);
@@ -647,7 +659,7 @@ impl Layouter {
                 // paragraphs), then every run piece intersecting this paragraph.
                 let si0 = style_at(prange.start);
                 let ui0 = sst(si0);
-                for p in style_props(&out.styles[ui0], k, &fallback, ui0 as u32, small_caps[si0]) {
+                for p in style_props(&out.styles[ui0], k, fallback, ui0 as u32, small_caps[si0]) {
                     b.push_default(p);
                 }
                 if let Some((word_gap, _)) = gaps {
@@ -657,7 +669,7 @@ impl Layouter {
                 if solved {
                     b.push_default(StyleProperty::TextWrapMode(TextWrapMode::NoWrap));
                 }
-                for ri in 0..runs.len() {
+                for ri in unit_runs.clone() {
                     let ui = sst(ri);
                     let st = &out.styles[ui];
                     let rs = run_starts[ri];
@@ -666,7 +678,7 @@ impl Layouter {
                         continue;
                     }
                     let range = (a - prange.start + prefix.len())..(z - prange.start + prefix.len());
-                    for p in style_props(st, k, &fallback, ui as u32, small_caps[ri]) {
+                    for p in style_props(st, k, fallback, ui as u32, small_caps[ri]) {
                         b.push(p, range.clone());
                     }
                     // Parley widens each space (U+0020 and no-break space) by the word spacing.
