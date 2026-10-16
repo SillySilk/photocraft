@@ -216,9 +216,14 @@ pub struct TextLayout {
     pub px_per_pt: f32,
     /// Vertical type: line space is turned 90° clockwise into text space.
     pub vertical: bool,
-    /// Box or area text that doesn't fit: some text is hidden past the box or shape, or a line
-    /// is wider than its box or span (a word too long to wrap). Always false for point and path
-    /// text. Dynamic Text's fit solver uses it as its "too big" test.
+    /// Box or area text that doesn't fit. True when text other than line and paragraph breaks
+    /// is hidden past the box or shape (an empty last paragraph below the box doesn't count), or
+    /// when a word is too long to wrap: a line's shaped advance, without trailing whitespace,
+    /// is more than 0.5 px wider than the width it was broken at (box or span less indents,
+    /// and on a paragraph's first line less the first-line indent). Horizontal scale and manual
+    /// or optical kerning are applied after line breaking and never count: lines they push past
+    /// the edge are drawn as before but not flagged. Always false for point and path text.
+    /// Dynamic Text's fit solver uses it as its "too big" test.
     pub overflowed: bool,
 }
 
@@ -524,6 +529,9 @@ impl Layouter {
         let mut prev_baseline: Option<f32> = None;
         let mut pending_space = 0.0f32;
         let mut stop = false;
+        // Whether hiding the text from `from` on hides anything but line and paragraph breaks
+        // (an empty last paragraph below the box is not overflow).
+        let hides_text = |from: usize| t.text.get(from..).is_none_or(|r| r.chars().any(|c| !matches!(c, '\r' | '\n' | FORCED_LINE_BREAK)));
         // Fixed for the whole layout, and the font probe only matters for styles that use small
         // caps. A real `smcp` substitution must receive lowercase source text; only the fallback
         // path uppercases it and scales it down.
@@ -729,11 +737,14 @@ impl Layouter {
                 pending_space += ps.space_before_pt * k;
             }
             let nlines = layout.len();
+            let map = |o: usize| (prange.start + o.saturating_sub(prefix.len())).min(content_end);
+            // End of the text this paragraph has shown so far.
+            let mut shown_end = prange.start;
             for (li, line) in layout.lines().enumerate() {
                 // Area type: the slot the breaker gave this line.
                 let slot = area_slots.get(li).copied();
                 if area.is_some() && slot.is_none() {
-                    out.overflowed = true;
+                    out.overflowed |= hides_text(map(line.text_range().start));
                     stop = true;
                     break;
                 }
@@ -757,14 +768,13 @@ impl Layouter {
                 // that line.
                 let overflow = if vertical { baseline + descent > -box_rect.0 + 0.5 } else { baseline > box_rect.1 + box_rect.3 + 0.5 };
                 if is_box && overflow {
-                    out.overflowed = true;
+                    out.overflowed |= hides_text(map(line.text_range().start));
                     stop = true;
                     break;
                 }
                 prev_baseline = Some(baseline);
                 let last_line = li + 1 == nlines;
                 let adv = m.advance - m.trailing_whitespace;
-                let map = |o: usize| (prange.start + o.saturating_sub(prefix.len())).min(content_end);
 
                 // Kerning after each cluster (px), per run in visual cluster order: manual
                 // kerning plus optical pair kerning. Applied after shaping (like horizontal
@@ -1058,17 +1068,20 @@ impl Layouter {
                 }
                 let x0 = dx + m.offset;
                 let x1 = x0 + adv + extra - trailing_tabs;
-                // A line wider than its box or span (a word too long to wrap) overflows it.
+                // A word too long to wrap: parley's own line advance (before horizontal scale and
+                // kerning, which it doesn't see) is wider than the width it broke the line at,
+                // which on a paragraph's first line has the first-line indent taken off.
                 if let Some(w) = line_avail
-                    && x1 - x0 > w + 0.5
+                    && adv > w - if li == 0 { first_indent } else { 0.0 } + 0.5
                 {
                     out.overflowed = true;
                 }
+                shown_end = shown_end.max(map(lr.end));
                 out.lines.push(LineInfo { range: map(lr.start)..map(lr.end).min(content_end), baseline, x0, x1, ascent, descent, paragraph: pi });
             }
             if area_full {
                 // The shape is full: the rest of this paragraph and later ones are hidden.
-                out.overflowed = true;
+                out.overflowed |= hides_text(shown_end);
                 stop = true;
             }
             pending_space += ps.space_after_pt * k;

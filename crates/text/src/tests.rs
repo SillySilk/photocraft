@@ -2355,3 +2355,96 @@ fn word_gap_widens_lines() {
     let px = 20.0 * layout_of(&t).px_per_pt;
     assert!((w1 - w0 - 3.0 * px).abs() < 1.0, "three spaces each widen by one size: {w0} -> {w1}");
 }
+
+#[test]
+fn hanging_first_line_indent_that_fits_is_not_overflow() {
+    // Photoshop's hanging indent: the first line starts 30 px left of the others and is 30 px
+    // wider than them.
+    // Short words fill each line to within a few px of its width.
+    let t = box_layer(&"ab ".repeat(80), 12.0, (0.0, 0.0, 200.0, 1000.0));
+    let t = with_para(t, ParagraphStyle { start_indent_pt: 30.0, first_line_indent_pt: -30.0, ..Default::default() });
+    let l = layout_of(&t);
+    assert!(l.lines.len() >= 2);
+    assert!(l.lines[0].x1 - l.lines[0].x0 > 170.5, "the first line uses its extra width: {:?}", l.lines[0]);
+    assert!(!l.overflowed, "{:?}", l.lines);
+}
+
+#[test]
+fn first_word_too_wide_for_a_positive_first_line_indent_is_overflow() {
+    let t = box_layer("Wonderfulness is a long word", 12.0, (0.0, 0.0, 200.0, 1000.0));
+    let t = with_para(t, ParagraphStyle { first_line_indent_pt: 150.0, ..Default::default() });
+    let l = layout_of(&t);
+    assert!(l.lines[0].x1 - l.lines[0].x0 > 50.5, "{:?}", l.lines[0]);
+    assert!(l.overflowed);
+}
+
+#[test]
+fn horizontal_scale_does_not_count_as_overflow() {
+    let style = CharStyle { font_family: "Inter".into(), size_pt: 12.0, horizontal_scale: 1.2, ..Default::default() };
+    let mut t = styled(BUBBLE_TEXT, style);
+    t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 200.0, height: 1000.0 };
+    let l = layout_of(&t);
+    assert!(l.lines.len() >= 2);
+    assert!(width(&l) > 200.5, "the scaled lines spill past the box, as before: {:?}", l.lines);
+    assert!(!l.overflowed, "parley wrapped every line inside the box");
+}
+
+#[test]
+fn hidden_empty_trailing_line_is_not_overflow() {
+    // Two 20 pt lines fill a 40 px box (baselines 14.6 and 38.6); the empty paragraph after
+    // the final break would sit below it.
+    let t = box_layer("alpha beta gamma delta\n", 20.0, (0.0, 0.0, 150.0, 40.0));
+    let l = layout_of(&t);
+    assert_eq!(l.lines.len(), 2, "{:?}", l.lines);
+    assert!(!l.overflowed);
+    let t = box_layer("alpha beta gamma delta\n\n", 20.0, (0.0, 0.0, 150.0, 40.0));
+    assert!(!layout_of(&t).overflowed);
+    // Real text after the break is hidden: overflow.
+    let t = box_layer("alpha beta gamma delta\n\nx", 20.0, (0.0, 0.0, 150.0, 40.0));
+    assert!(layout_of(&t).overflowed);
+}
+
+#[test]
+fn hidden_empty_trailing_area_paragraph_is_not_overflow() {
+    // A 30 px tall rectangle holds one 18 pt line and nothing more.
+    let mut t = point("hi\n", 18.0);
+    t.shape = TextShape::Area { path: area_poly(&[(0.0, 0.0), (300.0, 0.0), (300.0, 30.0), (0.0, 30.0)]) };
+    let l = layout_of(&t);
+    assert_eq!(l.lines.len(), 1, "{:?}", l.lines);
+    assert!(!l.overflowed);
+    t.text = "hi\nthere".into();
+    assert!(layout_of(&t).overflowed);
+}
+
+#[test]
+fn area_line_gap_spreads_rows() {
+    let mut t = point(BUBBLE_TEXT, 12.0);
+    t.shape = TextShape::Area { path: area_poly(&[(0.0, 0.0), (120.0, 0.0), (120.0, 600.0), (0.0, 600.0)]) };
+    let step = |gap: f32| {
+        let mut t = t.clone();
+        t.fit = Some(TextFit { word_gap: 0.0, line_gap: gap });
+        let l = layout_of(&t);
+        assert!(l.lines.len() >= 3 && !l.overflowed, "{:?}", l.lines);
+        l.lines[1].baseline - l.lines[0].baseline
+    };
+    let (s0, s1) = (step(0.0), step(100.0));
+    assert!((s1 - s0 - 12.0).abs() < 0.5, "100% line gap adds one size: {s0} -> {s1}");
+}
+
+#[test]
+fn fit_ignores_explicit_and_auto_leading() {
+    let base = |leading_pt: Option<f32>, auto_leading: f32| {
+        let style = CharStyle { font_family: "Inter".into(), size_pt: 20.0, leading_pt, ..Default::default() };
+        let mut t = styled("a\nb", style);
+        t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 400.0, height: 400.0 };
+        let mut t = with_para(t, ParagraphStyle { auto_leading, ..Default::default() });
+        t.fit = Some(TextFit::default());
+        let l = layout_of(&t);
+        l.lines[1].baseline - l.lines[0].baseline
+    };
+    let natural = base(None, 1.2);
+    assert!((base(Some(60.0), 1.2) - natural).abs() < 1e-3);
+    assert!((base(None, 3.0) - natural).abs() < 1e-3);
+    // The natural height is the line's ascent plus descent, less than 1.2 × size here.
+    assert!(natural > 15.0 && natural < 30.0, "{natural}");
+}
