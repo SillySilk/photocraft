@@ -27,11 +27,15 @@ fn is_fitted(layer: &TextLayer) -> bool {
 /// Largest uniform scale of every run's size (and `size_pt`) at which `layer` lays out with no
 /// overflow, the sizes staying within MIN_PT..=MAX_PT. Bounded by MAX_PROBES layouts.
 /// Point/Path layers, fit None, or empty text: scale 1, fits true, 0 probes.
+///
+/// Callers must refuse vertical text, RTL text and multi-layer input before fitting; this solver
+/// does not check for them.
 pub fn fit_scale(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> FitResult {
     if !is_fitted(layer) {
         return UNTOUCHED;
     }
-    let sizes: Vec<f32> = layer.char_runs().iter().map(|r| r.style.size_pt.max(MIN_PT)).collect();
+    let fallback = sane_fallback(layer);
+    let sizes: Vec<f32> = layer.char_runs().iter().map(|r| sane(r.style.size_pt, fallback).max(MIN_PT)).collect();
     let max_run = sizes.iter().copied().fold(MIN_PT, f32::max);
     let min_run = sizes.iter().copied().fold(MAX_PT, f32::min);
     let (lo, hi) = (MIN_PT / max_run, MAX_PT / min_run);
@@ -76,20 +80,44 @@ pub fn fit_scale(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) ->
     }
 }
 
+/// The layer's own size when finite, else MIN_PT: what a non-finite size is replaced with.
+fn sane_fallback(layer: &TextLayer) -> f32 {
+    if layer.size_pt.is_finite() { layer.size_pt.clamp(MIN_PT, MAX_PT) } else { MIN_PT }
+}
+
+fn sane(v: f32, fallback: f32) -> f32 {
+    if v.is_finite() { v } else { fallback }
+}
+
 /// Multiplies `size_pt` and every run's `size_pt` (and explicit `leading_pt`, `baseline_shift_pt`)
 /// by `scale`, clamping each size to MIN_PT..=MAX_PT. Keeps run ratios except where clamped.
+/// Paragraph indents and spacing scale too (signs kept, so hanging indents stay negative).
+/// Non-finite sizes become the layer's size (or MIN_PT) first, so NaN never reaches layout.
 pub fn apply_scale(layer: &mut TextLayer, scale: f32) {
-    let size = |v: f32| (v * scale).clamp(MIN_PT, MAX_PT);
+    let scale = if scale.is_finite() { scale } else { 1.0 };
+    let fallback = sane_fallback(layer);
+    let size = |v: f32| (sane(v, fallback) * scale).clamp(MIN_PT, MAX_PT);
+    let length = |v: f32| if v.is_finite() { (v * scale).clamp(-MAX_PT, MAX_PT) } else { 0.0 };
     layer.size_pt = size(layer.size_pt);
     for run in &mut layer.runs {
         let s = &mut run.style;
         s.size_pt = size(s.size_pt);
-        s.leading_pt = s.leading_pt.map(size);
-        s.baseline_shift_pt *= scale;
+        s.leading_pt = s.leading_pt.filter(|v| v.is_finite()).map(size);
+        s.baseline_shift_pt = length(s.baseline_shift_pt);
+    }
+    for para in &mut layer.paragraphs {
+        let p = &mut para.style;
+        p.first_line_indent_pt = length(p.first_line_indent_pt);
+        p.start_indent_pt = length(p.start_indent_pt);
+        p.end_indent_pt = length(p.end_indent_pt);
+        p.space_before_pt = length(p.space_before_pt);
+        p.space_after_pt = length(p.space_after_pt);
     }
 }
 
 /// fit_scale then apply_scale when `layer.fit` is Some and the shape is Box or Area. Returns the result.
+///
+/// Callers must refuse vertical text, RTL text and multi-layer input before calling.
 pub fn refit(engine: &mut crate::TextEngine, layer: &mut TextLayer, dpi: f32) -> FitResult {
     let result = fit_scale(engine, layer, dpi);
     if is_fitted(layer) {
@@ -128,7 +156,6 @@ mod tests {
         let mut e = TextEngine::new();
         let mut t = fit_box("The quick brown fox jumps over the lazy dog", 12.0, 300.0, 120.0);
         let r = refit(&mut e, &mut t, 72.0);
-        println!("probes fitted_box: {}", r.probes);
         assert!(r.fits && r.probes <= MAX_PROBES);
         assert!(!e.layout(&t, 72.0).overflowed);
         let mut bigger = t.clone();
@@ -153,7 +180,6 @@ mod tests {
         let mut e = TextEngine::new();
         let mut t = fit_box(&"word ".repeat(5000), 12.0, 2.0, 2.0);
         let r = refit(&mut e, &mut t, 72.0);
-        println!("probes long_text: {}", r.probes);
         assert!(!r.fits && r.probes <= MAX_PROBES);
         assert!((t.size_pt - MIN_PT).abs() < 1e-4);
     }
@@ -174,7 +200,6 @@ mod tests {
         let mut t = area_ellipse_layer(&"talk ".repeat(12), 12.0, 260.0, 160.0);
         t.fit = Some(TextFit::default());
         let r = refit(&mut e, &mut t, 72.0);
-        println!("probes area: {}", r.probes);
         assert!(r.fits && !e.layout(&t, 72.0).overflowed);
         let mut bigger = t.clone();
         apply_scale(&mut bigger, 1.02);
@@ -209,5 +234,54 @@ mod tests {
         assert_eq!(t.runs[1].style.size_pt, MAX_PT);
         apply_scale(&mut t, 1e-9);
         assert_eq!(t.runs[0].style.size_pt, MIN_PT);
+    }
+
+    fn with_para(t: &mut TextLayer, p: photocraft_doc::text::ParagraphStyle) {
+        t.paragraphs = vec![photocraft_doc::text::ParagraphRun { len: t.text.len(), style: p }];
+    }
+
+    #[test]
+    fn indents_that_swallow_the_box_scale_down_and_still_fit() {
+        let mut e = TextEngine::new();
+        let mut t = fit_box("one two three four", 12.0, 100.0, 200.0);
+        with_para(&mut t, photocraft_doc::text::ParagraphStyle { start_indent_pt: 60.0, end_indent_pt: 60.0, ..Default::default() });
+        assert!(e.layout(&t, 72.0).overflowed, "unscaled indents leave no room");
+        let r = refit(&mut e, &mut t, 72.0);
+        assert!(r.fits && t.size_pt > 1.0, "{r:?} {}", t.size_pt);
+        assert!(!e.layout(&t, 72.0).overflowed);
+        assert!(t.paragraphs[0].style.start_indent_pt < 60.0);
+    }
+
+    #[test]
+    fn apply_scale_halves_paragraph_fields_and_keeps_hanging_negative() {
+        let mut t = fit_box("ab", 10.0, 100.0, 100.0);
+        with_para(
+            &mut t,
+            photocraft_doc::text::ParagraphStyle {
+                first_line_indent_pt: -8.0,
+                start_indent_pt: 20.0,
+                end_indent_pt: 10.0,
+                space_before_pt: 6.0,
+                space_after_pt: 4.0,
+                ..Default::default()
+            },
+        );
+        apply_scale(&mut t, 0.5);
+        let p = &t.paragraphs[0].style;
+        assert_eq!((p.first_line_indent_pt, p.start_indent_pt, p.end_indent_pt, p.space_before_pt, p.space_after_pt), (-4.0, 10.0, 5.0, 3.0, 2.0));
+    }
+
+    #[test]
+    fn non_finite_sizes_never_reach_layout() {
+        let mut e = TextEngine::new();
+        let mut t = fit_box("ab", 10.0, 100.0, 100.0);
+        set_run_sizes(&mut t, &[(1, f32::NAN), (1, f32::INFINITY)]);
+        apply_scale(&mut t, 2.0);
+        assert!(t.runs.iter().all(|r| r.style.size_pt.is_finite() && r.style.size_pt >= MIN_PT));
+        assert_eq!(t.runs[0].style.size_pt, 20.0);
+        let mut u = fit_box("ab", f32::NAN, 100.0, 100.0);
+        set_run_sizes(&mut u, &[(1, f32::NAN), (1, 12.0)]);
+        let r = refit(&mut e, &mut u, 72.0);
+        assert!(r.scale.is_finite() && u.size_pt.is_finite() && u.runs.iter().all(|r| r.style.size_pt.is_finite()));
     }
 }
