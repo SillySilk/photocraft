@@ -56,15 +56,6 @@ impl Default for ShadowsHighlights {
 mod shadows_highlights;
 pub use shadows_highlights::shadows_highlights;
 
-/// Image › Adjustments › Replace Color: Color Range-style selection (fuzziness in 0..=200 levels)
-/// around `color`, then a hue (±180°), saturation and lightness (±100) shift weighted by it.
-/// Returns the selection mask (what the dialog previews).
-pub fn replace_color(px: &mut [[f32; 4]], color: [f32; 3], fuzziness: f32, hue: f32, saturation: f32, lightness: f32) -> Vec<f32> {
-    let mask = crate::selection::color_range(px, color, fuzziness);
-    replace_color_masked(px, &mask, hue, saturation, lightness);
-    mask
-}
-
 /// Replace Color's hue, saturation and lightness shift, applied to each pixel as far as `mask`
 /// (`0..=1`, one per pixel: the colour match, localized or not) covers it.
 pub fn replace_color_masked(px: &mut [[f32; 4]], mask: &[f32], hue: f32, saturation: f32, lightness: f32) {
@@ -314,15 +305,6 @@ mod tests {
                 [x, x * 0.8, x * 0.6 + 0.1, 1.0]
             })
             .collect()
-    }
-
-    #[test]
-    fn replace_color_only_touches_matching_pixels() {
-        let mut px = vec![[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]];
-        let m = replace_color(&mut px, [1.0, 0.0, 0.0], 40.0, 120.0, 0.0, 0.0);
-        assert_eq!(m[1], 0.0);
-        assert!(px[0][1] > 0.9 && px[0][0] < 0.1, "{:?}", px[0]);
-        assert_eq!(px[1], [0.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]

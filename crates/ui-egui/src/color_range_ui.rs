@@ -191,6 +191,14 @@ pub(crate) enum Slot {
 }
 
 impl Slot {
+    /// The dialog's name, for the log.
+    fn name(self) -> &'static str {
+        match self {
+            Slot::ColorRange => "Color Range",
+            Slot::ReplaceColor => "Replace Color",
+        }
+    }
+
     fn texture(self, what: &str) -> String {
         match self {
             Slot::ColorRange => format!("color-range-{what}"),
@@ -344,7 +352,7 @@ fn report(app: &mut PhotocraftApp, slot: Slot, error: Option<String>) {
     let Some(p) = cache_mut(app, slot) else { return };
     if p.error != error {
         if let Some(e) = &error {
-            log::warn!("{slot:?} preview: {e}");
+            log::warn!("{} preview: {e}", slot.name());
         }
         p.error = error;
     }
