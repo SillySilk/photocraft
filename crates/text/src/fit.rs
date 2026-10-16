@@ -1059,4 +1059,26 @@ THREE",
         refit(&mut e, &mut u, 72.0);
         assert_eq!(u.runs, runs);
     }
+
+    #[test]
+    fn long_text_in_a_tiny_box_bottoms_out_at_minimum() {
+        let mut e = TextEngine::new();
+        let mut t = fit_box(&"word ".repeat(5000), 12.0, 2.0, 2.0);
+        let r = refit(&mut e, &mut t, 72.0);
+        let s = scales(&t);
+        assert!(!s.is_empty() && s.iter().all(|v| v.is_finite() && *v > 0.0) && r.probes <= MAX_PROBES);
+        let smallest = s.iter().map(|v| v * t.size_pt).fold(f32::MAX, f32::min);
+        assert!((smallest - MIN_PT).abs() < 1e-4, "smallest effective size {smallest}");
+    }
+
+    #[test]
+    fn box_indents_wider_than_the_box_stay_finite_and_fit() {
+        let mut e = TextEngine::new();
+        let mut t = fit_box("one two three four", 12.0, 100.0, 200.0);
+        with_para(&mut t, photocraft_doc::text::ParagraphStyle { start_indent_pt: 60.0, end_indent_pt: 60.0, ..Default::default() });
+        let (t, l) = solved(&mut e, t);
+        let s = scales(&t);
+        assert!(!s.is_empty() && s.iter().all(|v| v.is_finite() && *v > 0.0), "{s:?}");
+        assert!(!l.hidden && bottom(&l) <= 200.5, "bottom {}", bottom(&l));
+    }
 }
