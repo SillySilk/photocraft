@@ -313,8 +313,9 @@ fn refused_targets() {
 }
 
 #[test]
-fn a_fitted_layer_loaded_as_vertical_is_not_refitted() {
-    // The commands refuse to make a fitted layer vertical; a file can still hold one.
+fn a_fitted_layer_loaded_as_vertical_must_be_released_first() {
+    // The commands refuse to make a fitted layer vertical; a file can still hold one. Edits are
+    // refused until it is released, and the solver never sees it.
     let (mut s, id) = session_with_box_text("Hello there", 12.0, [0.0, 0.0, 300.0, 100.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
     s.edit("vertical", |doc, _| {
@@ -324,9 +325,14 @@ fn a_fitted_layer_loaded_as_vertical_is_not_refitted() {
         Ok(())
     })
     .unwrap();
-    let size = text(&s, id).size_pt;
-    s.execute("type.edit", json!({"layer": id.0, "text": "Hello there ".repeat(50)})).unwrap();
+    let (size, before) = (text(&s, id).size_pt, history_len(&s));
+    assert_release_first(s.execute("type.edit", json!({"layer": id.0, "text": "Hello there ".repeat(50)})), "type.edit");
+    assert_eq!(history_len(&s), before);
+    s.execute("type.updateAllTextLayers", json!({})).unwrap();
     assert!((text(&s, id).size_pt - size).abs() < 1e-4, "the solver never sees vertical text");
+    s.execute("type.releaseDynamicText", json!({"layer": id.0})).unwrap();
+    assert!(text(&s, id).fit.is_none());
+    s.execute("type.edit", json!({"layer": id.0, "text": "Hello again"})).unwrap();
 }
 
 #[test]
@@ -481,4 +487,66 @@ fn release_refuses_a_look_it_cannot_keep() {
     let doc = s.active().unwrap().doc.clone();
     let r = photocraft_io::export(&doc, "x.psd", &photocraft_io::ExportOptions::default()).unwrap();
     assert!(r.warnings.iter().any(|w| w.contains("could not be baked")), "{:?}", r.warnings);
+}
+
+/// `r` is the guard's refusal, named after `cmd`.
+fn assert_release_first(r: Result<Value>, cmd: &str) {
+    match r {
+        Err(EngineError::BadParams { cmd: c, msg }) => {
+            assert_eq!(c, cmd);
+            assert!(msg.contains("Release Dynamic Text first"), "{cmd}: {msg}");
+        }
+        other => panic!("{cmd}: {other:?}"),
+    }
+}
+
+#[test]
+fn convert_to_point_text_on_a_fitted_layer_is_refused() {
+    let (mut s, id) = session_with_box_text("Hello dynamic world", 12.0, [0.0, 0.0, 300.0, 100.0]);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    let (before, t0) = (history_len(&s), text(&s, id));
+    assert_release_first(s.execute("type.convertToPointText", json!({"layer": id.0})), "type.convertToPointText");
+    assert_eq!(history_len(&s), before, "no history step");
+    let t = text(&s, id);
+    assert_eq!((t.text, t.shape), (t0.text, t0.shape));
+    assert!(t.fit.is_some());
+}
+
+#[test]
+fn paragraph_styles_cannot_make_a_fitted_layer_right_to_left() {
+    let (mut s, id) = session_with_box_text("Hello dynamic world", 12.0, [0.0, 0.0, 300.0, 100.0]);
+    let plain =
+        s.execute("type.paragraphStyle.new", json!({"name": "Plain", "fromSelection": false, "attrs": {"align": "left"}})).unwrap()["id"].as_u64().unwrap();
+    let rtl =
+        s.execute("type.paragraphStyle.new", json!({"name": "Rtl", "fromSelection": false, "attrs": {"direction": "rtl"}})).unwrap()["id"].as_u64().unwrap();
+    s.execute("type.paragraphStyle.apply", json!({"id": plain, "layer": id.0})).unwrap();
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    let before = history_len(&s);
+    assert_release_first(s.execute("type.paragraphStyle.apply", json!({"id": rtl, "layer": id.0})), "type.paragraphStyle.apply");
+    assert_release_first(s.execute("type.paragraphStyle.set", json!({"id": plain, "attrs": {"direction": "rtl"}})), "type.paragraphStyle.set");
+    assert_eq!(history_len(&s), before, "no history step");
+    let t = text(&s, id);
+    assert!(t.fit.is_some() && fit_refusal(&t).is_none(), "{:?}", t.paragraph_runs());
+}
+
+#[test]
+fn auto_direction_right_to_left_text_is_refused() {
+    // Hebrew in an Auto-direction paragraph lays out right to left.
+    let (mut s, id) = session_with_box_text("שלום עולם", 12.0, [0.0, 0.0, 300.0, 100.0]);
+    assert!(fit_refusal(&text(&s, id)).is_some_and(|m| m.contains("right-to-left")));
+    assert!(!s.is_enabled("type.convertToDynamicText"));
+    let before = history_len(&s);
+    let e = s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap_err().to_string();
+    assert!(e.contains("right-to-left"), "{e}");
+    assert_eq!(history_len(&s), before);
+    assert!(text(&s, id).fit.is_none());
+    // A paragraph that starts with Latin letters stays left to right.
+    let (mut s, id) = session_with_box_text("Hi שלום", 12.0, [0.0, 0.0, 300.0, 100.0]);
+    assert!(fit_refusal(&text(&s, id)).is_none());
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    // Typing text that turns the fitted layer right to left is refused.
+    let before = history_len(&s);
+    assert_release_first(s.execute("type.edit", json!({"layer": id.0, "text": "שלום Hi"})), "type.edit");
+    assert_eq!(history_len(&s), before);
+    assert_eq!(text(&s, id).text, "Hi שלום");
 }

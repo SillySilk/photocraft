@@ -1221,8 +1221,9 @@ fn break_units(text: &str, lines: &[FitLine]) -> Vec<Unit> {
 }
 
 /// Whether the first strong character of `s` is right-to-left (UAX #9 P2, without isolates), or
-/// `None` when it has none.
-fn first_strong_rtl(s: &str) -> Option<bool> {
+/// `None` when it has none. Dynamic Text uses it to refuse Auto-direction paragraphs that lay out
+/// right to left.
+pub fn first_strong_rtl(s: &str) -> Option<bool> {
     use icu_properties::{CodePointMapData, props::BidiClass};
     let classes = CodePointMapData::<BidiClass>::new();
     s.chars().find_map(|c| match classes.get(c) {

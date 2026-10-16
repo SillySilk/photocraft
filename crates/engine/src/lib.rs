@@ -417,6 +417,8 @@ pub struct Session {
     pub journal: Vec<(String, Value)>,
     /// Coalescing key of the command being executed.
     coalesce_request: Option<String>,
+    /// Id of the command `dispatch` is running, so shared edit helpers can name it in errors.
+    pub(crate) running_command: Option<&'static str>,
     /// Pixels copied with Edit › Copy / Cut (shared by all documents, like Photoshop).
     pub clipboard: Option<edit_cmds::Clip>,
     /// Layer › Layer Style › Copy Layer Style: effects, blend mode, fill opacity and the Advanced

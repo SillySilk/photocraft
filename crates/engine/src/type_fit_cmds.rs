@@ -3,7 +3,7 @@
 //! fitted layer refits it in the same history step.
 
 use photocraft_doc::text::{Orientation, TextDirection, TextFit, TextShape};
-use photocraft_doc::{LayerContent, TextLayer};
+use photocraft_doc::{Document, LayerContent, LayerId, TextLayer};
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -20,18 +20,52 @@ fn bad(cmd: &str, m: &str) -> EngineError {
 }
 
 /// Why `t` cannot be fitted, or `None`. The solver does not check these itself: vertical type,
-/// right-to-left paragraphs and path text are refused here, and `refresh` skips them.
+/// right-to-left paragraphs (set so, or Auto with a right-to-left first strong character) and
+/// path text are refused here, and `refresh` skips them.
 pub fn fit_refusal(t: &TextLayer) -> Option<&'static str> {
     if t.orientation == Orientation::Vertical {
         return Some("Dynamic Text does not support vertical type");
     }
-    if t.paragraph_runs().iter().any(|p| p.style.direction == TextDirection::Rtl) {
+    let mut at = 0usize;
+    let rtl = t.paragraph_runs().iter().any(|p| {
+        let range = at..at.saturating_add(p.len);
+        at = range.end;
+        match p.style.direction {
+            TextDirection::Rtl => true,
+            TextDirection::Ltr => false,
+            TextDirection::Auto => t.text.get(range).and_then(photocraft_text::layout::first_strong_rtl) == Some(true),
+        }
+    });
+    if rtl {
         return Some("Dynamic Text does not support right-to-left text");
     }
     if matches!(t.shape, TextShape::Path { .. }) {
         return Some("Dynamic Text does not support type on a path");
     }
     None
+}
+
+/// The one guard that keeps an edit from breaking Dynamic Text: a layer that was fitted before
+/// the edit (`before`, the document the edit started from) and is still fitted after it must
+/// still be fittable box or area type. Otherwise the edit fails as `cmd`, and the caller's
+/// `Session::edit` discards it with no history step. Convert and Release pass: before Convert
+/// the layer was not fitted, after Release it no longer is.
+pub(crate) fn guard_fit(before: &Document, id: LayerId, t: &TextLayer, cmd: &str) -> Result<()> {
+    let was_fitted = matches!(before.layer(id).map(|l| &l.content), Some(LayerContent::Text(o)) if o.fit.is_some());
+    if !was_fitted || t.fit.is_none() {
+        return Ok(());
+    }
+    let why = fit_refusal(t).or_else(|| (!matches!(t.shape, TextShape::Box { .. } | TextShape::Area { .. })).then_some("Dynamic Text needs box or area type"));
+    match why {
+        Some(why) => Err(bad(cmd, &format!("Release Dynamic Text first ({why})"))),
+        None => Ok(()),
+    }
+}
+
+/// The running command's id for [`guard_fit`]; `fallback` (the edit's label) when the helper
+/// runs outside `Session::execute`, as in a direct engine call.
+pub(crate) fn guard_cmd<'a>(s: &Session, fallback: &'a str) -> &'a str {
+    s.running_command.unwrap_or(fallback)
 }
 
 fn active_text(s: &Session) -> std::result::Result<&TextLayer, String> {

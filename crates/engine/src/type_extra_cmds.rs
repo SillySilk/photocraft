@@ -73,6 +73,7 @@ fn has_defaults(s: &Session) -> std::result::Result<(), String> {
 pub(crate) fn with_text<R>(s: &mut Session, p: &Value, label: &str, f: impl FnOnce(&mut TextLayer, &Document) -> Result<R>) -> Result<R> {
     let id = layer_param(s, p)?;
     check_text_unlocked(&s.active().ok_or(EngineError::NoDocument)?.doc, id)?;
+    let cmd = crate::type_fit_cmds::guard_cmd(s, label);
     s.edit(label, |doc, _| {
         let snapshot = doc.clone();
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
@@ -81,6 +82,7 @@ pub(crate) fn with_text<R>(s: &mut Session, p: &Value, label: &str, f: impl FnOn
             return Err(EngineError::Other(format!("layer {} is {} {} layer, not a type layer", id.0, l.content.article(), l.content.kind_name())));
         };
         let r = f(t, &snapshot)?;
+        crate::type_fit_cmds::guard_fit(&snapshot, id, t, cmd)?;
         refresh(&snapshot, t);
         let name = auto_named.then(|| layer_name(&t.text));
         if let Some(n) = name {
@@ -135,11 +137,7 @@ fn set_aa(s: &mut Session, p: &Value, aa: AntiAlias) -> Result<Value> {
 }
 
 fn set_orientation(s: &mut Session, p: &Value, o: Orientation) -> Result<Value> {
-    let cmd = if o == Orientation::Vertical { "type.orientation.vertical" } else { "type.orientation.horizontal" };
     with_text_targets(s, p, "Change Text Orientation", |t, _| {
-        if o == Orientation::Vertical && t.fit.is_some() {
-            return Err(EngineError::BadParams { cmd: cmd.into(), msg: "Release Dynamic Text first".into() });
-        }
         t.orientation = o;
         Ok(())
     })?;
@@ -385,9 +383,6 @@ fn attach_to_path(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let sub = path_source(doc, p)?;
     with_text(s, p, "Type on a Path", |t, _| {
-        if t.fit.is_some() {
-            return Err(bad("Release Dynamic Text first"));
-        }
         // The path lives in document space; the type layer keeps it in its own text space, so
         // the type lands on the path where it is drawn.
         let inv = t.transform.inverse().ok_or_else(|| EngineError::Other("the type layer's transform cannot be inverted".into()))?;

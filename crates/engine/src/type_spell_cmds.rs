@@ -105,6 +105,7 @@ fn change(s: &mut Session, p: &Value) -> Result<Value> {
         let snapshot = doc.clone();
         if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
             replace_text(t, a, b, &to);
+            crate::type_fit_cmds::guard_fit(&snapshot, id, t, cmd)?;
             refresh(&snapshot, t);
         }
         Ok(())
@@ -135,6 +136,7 @@ fn change_all(s: &mut Session, p: &Value) -> Result<Value> {
                     for (a, b) in hits.iter().rev() {
                         replace_text(t, *a, *b, &to);
                     }
+                    crate::type_fit_cmds::guard_fit(&snapshot, *id, t, cmd)?;
                     refresh(&snapshot, t);
                 }
             }
@@ -218,6 +220,7 @@ fn insert_text(s: &mut Session, p: &Value) -> Result<Value> {
         let snapshot = doc.clone();
         if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
             replace_text(t, ba, bb, &new);
+            crate::type_fit_cmds::guard_fit(&snapshot, id, t, cmd)?;
             refresh(&snapshot, t);
         }
         Ok(())
