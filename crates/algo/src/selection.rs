@@ -467,33 +467,6 @@ pub struct RangeSample {
     pub at: Option<(f32, f32)>,
 }
 
-/// Color Range › Sampled Colors with several samples (the dialog's "Add to Sample" eyedropper):
-/// each pixel takes its best match over the samples, each judged like [`color_range`]. With
-/// `localized` (Localized Color Clusters) a sample also fades with distance from where it was
-/// picked, reaching 0 at `localized` pixels, so only nearby matching colours are selected;
-/// samples without a position aren't localized. `w` is the row width of `px`.
-pub fn color_range_samples(px: &[[f32; 4]], w: usize, samples: &[RangeSample], fuzziness: f32, localized: Option<f32>) -> Vec<f32> {
-    let f = fuzziness.max(0.0) + 1.0;
-    px.iter()
-        .enumerate()
-        .map(|(i, &[r, g, b, a])| {
-            if a <= 0.0 {
-                return 0.0;
-            }
-            let (x, y) = ((i % w.max(1)) as f32, (i / w.max(1)) as f32);
-            samples.iter().fold(0.0f32, |best, s| {
-                let d = [r, g, b].iter().zip(&s.color).map(|(v, c)| (v - c).abs() * 255.0).fold(0.0f32, f32::max);
-                let mut k = (1.0 - d / f).clamp(0.0, 1.0);
-                if let (Some(radius), Some((sx, sy))) = (localized, s.at) {
-                    let dist = ((x - sx).powi(2) + (y - sy).powi(2)).sqrt();
-                    k *= (1.0 - dist / radius.max(1.0)).clamp(0.0, 1.0);
-                }
-                best.max(k)
-            })
-        })
-        .collect()
-}
-
 /// The colours of Color Range › Sampled Colors: the Lab box spanned by the eyedropper samples
 /// (Photoshop records it in actions as the Minimum and Maximum Lab colours; "Add to Sample"
 /// grows it). One sample is a box of size zero. CIE Lab (D50): L 0–100, a and b about −128–127.
@@ -977,28 +950,6 @@ mod tests {
         assert!(m[1] > 0.3 && m[1] < 1.0);
         assert_eq!(m[2], 0.0);
         assert_eq!(m[3], 0.0);
-    }
-
-    #[test]
-    fn color_range_several_samples_and_localized() {
-        let red = [1.0, 0.0, 0.0, 1.0];
-        let blue = [0.0, 0.0, 1.0, 1.0];
-        let green = [0.0, 1.0, 0.0, 1.0];
-        // 4 × 1: red, blue, green, red.
-        let px = vec![red, blue, green, red];
-        let s = |c: [f32; 4], at: Option<(f32, f32)>| RangeSample { color: [c[0], c[1], c[2]], at };
-        let m = color_range_samples(&px, 4, &[s(red, None), s(blue, None)], 10.0, None);
-        assert_eq!(m, vec![1.0, 1.0, 0.0, 1.0]);
-        // One sample is exactly the single-colour Color Range.
-        assert_eq!(color_range_samples(&px, 4, &[s(red, None)], 40.0, None), color_range(&px, [1.0, 0.0, 0.0], 40.0));
-        // Localized at x = 0 with a 2 px range: the far red pixel (x = 3) drops out, x = 1 would be half.
-        let m = color_range_samples(&px, 4, &[s(red, Some((0.0, 0.0)))], 10.0, Some(2.0));
-        assert_eq!(m, vec![1.0, 0.0, 0.0, 0.0]);
-        let reds = vec![red; 4];
-        let m = color_range_samples(&reds, 4, &[s(red, Some((0.0, 0.0)))], 10.0, Some(2.0));
-        assert_eq!(m, vec![1.0, 0.5, 0.0, 0.0]);
-        // No samples: nothing selected.
-        assert!(color_range_samples(&px, 4, &[], 10.0, None).iter().all(|v| *v == 0.0));
     }
 
     /// Photoshop 2024's own Color Range coverage around the sample Lab (60, 25, 19.9961), read

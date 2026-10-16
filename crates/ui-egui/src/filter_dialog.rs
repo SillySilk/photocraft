@@ -901,7 +901,7 @@ pub(crate) fn preview_document_for_target(
     // Replace Color's eyedropper samples are document pixels read from the original document,
     // as OK does (a reduced pixel is an average); the copy is only what the result is drawn on.
     if command == REPLACE_COLOR && run_k > 1 {
-        photocraft_engine::adjust_cmds::replace_color_reduced(&mut s, doc, &p, run_k).ok()?;
+        photocraft_engine::adjust_cmds::replace_color_reduced(&mut s, doc, &p, run_k).inspect_err(|e| log::warn!("Replace Color preview: {e}")).ok()?;
     } else {
         s.execute(command, p).ok()?;
     }
@@ -2369,10 +2369,9 @@ mod tests {
         let mut app = PhotocraftApp::new(s, crate::Services::default());
         let mut h = Harness::builder().with_size(egui::vec2(900.0, 800.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), &mut app);
         PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
-        let id = open(h.state_mut(), REPLACE_COLOR).unwrap();
+        open(h.state_mut(), REPLACE_COLOR).unwrap();
         h.run_steps(3);
         let _ = h.get_by_label("Localized Color Clusters");
-        let _ = id;
         assert!(crate::replace_color_ui::pick_top(h.state_mut(), [2.0, 5.0], egui::Modifiers::NONE));
         h.get_by_label("Localized Color Clusters").click();
         h.run_steps(2);

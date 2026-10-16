@@ -722,7 +722,6 @@ fn replace_color_subtracting_a_shade_inside_the_sampled_range_trims_the_nearer_e
         };
         let control = greens(&run(json!({"order": ["+", "+"]})));
         let sub = greens(&run(json!({"subtractPoints": [[15, 5]], "order": ["+", "+", "-"]})));
-        eprintln!("control {control:?} subtract {sub:?}");
         assert!(control.iter().all(|g| *g > 0.5), "{depth}-bit: control shifts every shade: {control:?}");
         assert!(sub[1] > 0.5, "{depth}-bit: the subtracted shade stays selected at the new edge: {sub:?}");
         assert!(sub[0].min(sub[2]) < control[0].min(control[2]) - 0.3, "{depth}-bit: subtract drops one end: {sub:?} vs {control:?}");
@@ -744,7 +743,6 @@ fn replace_color_subtracting_a_shade_inside_the_from_colours_trims_the_nearer_ed
         };
         let control = run(json!({}));
         let sub = run(json!({"subtractPoints": [[15, 5]]}));
-        eprintln!("control {control:?} subtract {sub:?}");
         assert!(control.iter().all(|g| *g > 0.5), "{depth}-bit: {control:?}");
         assert!(sub[0].min(sub[2]) < control[0].min(control[2]) - 0.3, "{depth}-bit: subtract narrows: {sub:?} vs {control:?}");
     }
