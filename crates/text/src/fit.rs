@@ -189,6 +189,9 @@ struct Solved {
     /// Full layouts: one to measure, then the refinement passes.
     #[cfg_attr(not(test), expect(dead_code, reason = "read by the bound tests"))]
     layouts: usize,
+    /// Base layout lines visited while splitting into segments.
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the bound tests"))]
+    visited: usize,
 }
 
 /// Photoshop Block: lines and per-line scales so each line spans the box width and the block
@@ -209,7 +212,7 @@ pub fn solve_box(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) ->
 }
 
 fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved {
-    let none = Solved { lines: Vec::new(), fits: true, probes: 0, layouts: 0 };
+    let none = Solved { lines: Vec::new(), fits: true, probes: 0, layouts: 0, visited: 0 };
     let TextShape::Box { y: box_y, width, height, .. } = layer.shape else { return none };
     if layer.text.is_empty() || u32::try_from(layer.text.len()).is_err() || !width.is_finite() || !height.is_finite() || !box_y.is_finite() {
         return none;
@@ -235,7 +238,7 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
     let mut point = base.clone();
     point.shape = TextShape::Point;
     let measured = engine.layout(&point, dpi);
-    let segs = segments(&base, &measured, k, box_w);
+    let (segs, visited) = segments(&base, &measured, k, box_w);
     if segs.is_empty() {
         return none;
     }
@@ -341,11 +344,12 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
         scales = next;
     }
     let lines = starts.iter().zip(&scales).map(|(&start, &scale)| FitLine { start, scale }).collect();
-    Solved { lines, fits, probes, layouts }
+    Solved { lines, fits, probes, layouts, visited }
 }
 
 /// Splits the layer into segments of words measured in `m` (the layer laid out as point text).
-fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> Vec<Segment> {
+/// Also returns how many base layout lines it visited (tests check it stays linear).
+fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> (Vec<Segment>, usize) {
     use crate::layout::{FORCED_LINE_BREAK, split_paragraphs};
     let text = &t.text;
     let runs = t.char_runs();
@@ -372,7 +376,10 @@ fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> Vec<Seg
 
     let mut clusters: Vec<&crate::ClusterInfo> = m.clusters.iter().collect();
     clusters.sort_by_key(|c| c.range.start);
+    let mut lines: Vec<&crate::LineInfo> = m.lines.iter().collect();
+    lines.sort_by_key(|l| l.range.start);
     let mut out = Vec::new();
+    let mut visited = 0usize;
     for prange in split_paragraphs(text) {
         let content_end = prange.start + text.get(prange.clone()).unwrap_or("").trim_end_matches(['\r', '\n']).len();
         let ps = para_at(prange.start);
@@ -410,7 +417,9 @@ fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> Vec<Seg
             }
             // Ascent and descent per px from the base line(s) of this segment.
             let (mut asc, mut desc) = (0.0f32, 0.0f32);
-            for l in m.lines.iter().filter(|l| l.range.start >= a && l.range.start <= z) {
+            let from = lines.partition_point(|l| l.range.start < a);
+            for l in lines[from..].iter().take_while(|l| l.range.start <= z) {
+                visited += 1;
                 asc = asc.max(l.ascent);
                 desc = desc.max(l.descent);
             }
@@ -432,7 +441,7 @@ fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> Vec<Seg
             });
         }
     }
-    out
+    (out, visited)
 }
 
 /// Whether `c` extends the grapheme before it (combining marks, spacing marks, ZWJ).
@@ -988,5 +997,18 @@ THREE",
             assert_spans(&l, 400.0);
             assert!(!l.overflowed, "hs {hs} kern {kern}: solved lines aren't flagged too wide");
         }
+    }
+
+    #[test]
+    fn many_short_lines_stay_linear() {
+        let mut e = TextEngine::new();
+        let text = "ab cd
+"
+        .repeat(5000);
+        let t = fit_box(&text, 12.0, 400.0, 300.0);
+        let r = solve(&mut e, &t, 72.0);
+        assert_eq!(r.lines.len(), 5001, "one line per paragraph (the box is too short)");
+        assert!(r.probes <= MAX_PROBES && r.layouts <= 1 + REFINE_PASSES, "{} probes, {} layouts", r.probes, r.layouts);
+        assert!(r.visited <= 2 * r.lines.len(), "{} base lines visited for {} segments", r.visited, r.lines.len());
     }
 }
