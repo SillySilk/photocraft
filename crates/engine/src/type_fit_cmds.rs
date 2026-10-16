@@ -21,7 +21,7 @@ fn bad(cmd: &str, m: &str) -> EngineError {
 
 /// Why `t` cannot be fitted, or `None`. The solver does not check these itself: vertical type,
 /// right-to-left paragraphs and path text are refused here, and `refresh` skips them.
-pub(crate) fn fit_refusal(t: &TextLayer) -> Option<&'static str> {
+pub fn fit_refusal(t: &TextLayer) -> Option<&'static str> {
     if t.orientation == Orientation::Vertical {
         return Some("Dynamic Text does not support vertical type");
     }
