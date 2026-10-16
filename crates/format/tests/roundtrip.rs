@@ -588,6 +588,91 @@ fn area_text_shape_roundtrips() {
     assert_eq!(shape, Some(TextShape::Area { path }));
 }
 
+/// Rewrites every text layer's JSON in `manifest.json` (other entries pass through).
+fn edit_text_manifest(bytes: &[u8], edit: impl Fn(&mut serde_json::Map<String, serde_json::Value>)) -> Vec<u8> {
+    fn walk(v: &mut serde_json::Value, edit: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>)) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if m.get("kind").and_then(|k| k.as_str()) == Some("text") {
+                    edit(m);
+                }
+                for c in m.values_mut() {
+                    walk(c, edit);
+                }
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|c| walk(c, edit)),
+            _ => {}
+        }
+    }
+    let r = zip::ZipReader::new(bytes).unwrap();
+    let mut z = zip::ZipWriter::new();
+    for e in &r.entries {
+        let mut d = r.read(e, usize::MAX).unwrap();
+        if e.name == "manifest.json" {
+            let mut v: serde_json::Value = serde_json::from_slice(&d).unwrap();
+            walk(&mut v, &edit);
+            d = serde_json::to_vec(&v).unwrap();
+        }
+        z.add(&e.name, &d).unwrap();
+    }
+    z.finish().unwrap()
+}
+
+fn text_fits(doc: &Document) -> Vec<Option<photocraft_doc::text::TextFit>> {
+    doc.walk()
+        .into_iter()
+        .filter_map(|(_, _, l)| match &l.content {
+            LayerContent::Text(t) => Some(t.fit),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Dynamic Text: the fit gaps survive .pcraft.
+#[test]
+fn fit_round_trips() {
+    use photocraft_doc::text::{TextFit, TextShape};
+    let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
+    let ids: Vec<LayerId> = doc.walk().into_iter().filter(|(_, _, l)| matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.id).collect();
+    assert!(!ids.is_empty());
+    let fit = TextFit { word_gap: 10.0, line_gap: -5.0 };
+    for id in ids {
+        if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
+            t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
+            t.fit = Some(fit);
+        }
+    }
+    let back = load_from_bytes(&save_to_bytes(&doc, &SaveOptions::default()).unwrap()).unwrap();
+    let fits = text_fits(&back);
+    assert!(!fits.is_empty() && fits.iter().all(|f| *f == Some(fit)));
+}
+
+/// Files saved before Dynamic Text have no `fit` key and load as ordinary type.
+#[test]
+fn missing_fit_loads_as_none() {
+    let doc = rich_doc(ColorMode::Rgb, SampleType::U8);
+    let bytes = save_to_bytes(&doc, &SaveOptions::default()).unwrap();
+    let old = edit_text_manifest(&bytes, |m| {
+        m.remove("fit");
+    });
+    let fits = text_fits(&load_from_bytes(&old).unwrap());
+    assert!(!fits.is_empty() && fits.iter().all(Option::is_none));
+}
+
+/// Hostile gap values in a file are clamped on load.
+#[test]
+fn nan_gaps_clamp_on_load() {
+    use photocraft_doc::text::TextFit;
+    let doc = rich_doc(ColorMode::Rgb, SampleType::U8);
+    let bytes = save_to_bytes(&doc, &SaveOptions::default()).unwrap();
+    let hostile = edit_text_manifest(&bytes, |m| {
+        m.insert("fit".into(), serde_json::json!({ "lineGap": 1e9, "wordGap": -1e9 }));
+    });
+    let fits = text_fits(&load_from_bytes(&hostile).unwrap());
+    let want = Some(TextFit { word_gap: TextFit::GAP_MIN, line_gap: TextFit::GAP_MAX });
+    assert!(!fits.is_empty() && fits.iter().all(|f| *f == want));
+}
+
 #[test]
 fn channel_restrictions_and_bevel_elements_roundtrip() {
     use photocraft_doc::{Bevel, BevelContour, BevelTexture, Contour, Effect};
