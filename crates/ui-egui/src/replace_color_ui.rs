@@ -84,12 +84,13 @@ fn pick_fields(app: &mut PhotocraftApp, f: &mut Map<String, Value>, at: [f64; 2]
     }
     let tool = crate::color_range_ui::tool_of(f, mods).to_string();
     crate::color_range_ui::pick(app, f, at, mods, "order");
-    // From colour follows the first sample (the point's own colour keeps the Lab box unchanged).
+    // A plain sample sets From colour to the sampled pixel (its own colour keeps the Lab box
+    // unchanged). Add and subtract only reshape the match: they never replace a From colour, which
+    // may have been chosen in its Color Picker.
     let pts = f.get("points").and_then(Value::as_array).cloned().unwrap_or_default();
     let first = pts.first().and_then(|p| Some((p.get(0)?.as_f64()?, p.get(1)?.as_f64()?)));
     if let Some((x, y)) = first
-        && tool != "subtract"
-        && (tool == "sample" || pts.len() == 1)
+        && tool == "sample"
         && let Some(rgb) = crate::canvas::composite_color(app, x, y)
     {
         f.insert("color".into(), json!(crate::color_picker_ui::hex(rgb)));
@@ -558,6 +559,22 @@ mod tests {
         assert_eq!(f["hue"].as_f64(), Some(120.0));
         assert_eq!(f["points"], json!([[25.0, 5.0]]), "an eyedropper sample is not cleared");
         assert_ne!(f["__result"], json!("#00ff00"));
+    }
+
+    /// Add to Sample grows the match; it never replaces a From colour chosen in its Color Picker.
+    #[test]
+    fn shift_add_keeps_a_from_colour_picked_in_the_color_picker() {
+        let mut app = app_with_doc();
+        let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
+        {
+            let f = &mut app.ui.dialog_mut(id).unwrap().fields;
+            f.insert("color".into(), json!("#00ff00"));
+            sync_result(f);
+        }
+        assert!(pick_top(&mut app, [5.0, 5.0], egui::Modifiers::SHIFT));
+        let f = fields(&app);
+        assert_eq!(f["points"], json!([[5.0, 5.0]]), "the added sample is kept");
+        assert_eq!(f["color"], json!("#00ff00"), "Shift-click must not overwrite the picked From colour");
     }
 
     #[test]
