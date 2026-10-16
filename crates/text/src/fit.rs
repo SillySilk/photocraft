@@ -1120,6 +1120,21 @@ mod tests {
     }
 
     #[test]
+    fn justified_lines_still_span_the_box_width() {
+        use photocraft_doc::text::{ParagraphStyle, TextAlign};
+        for align in [TextAlign::JustifyLeft, TextAlign::JustifyCenter, TextAlign::JustifyRight, TextAlign::JustifyAll] {
+            let mut e = TextEngine::new();
+            let mut t = fit_box(FOX, 12.0, 400.0, 300.0);
+            with_para(&mut t, ParagraphStyle { align, ..Default::default() });
+            let (t, l) = solved(&mut e, t);
+            assert!(scales(&t).len() >= 2, "{align:?}: {:?}", scales(&t));
+            assert_spans(&l, 400.0);
+            // Every line starts at the box's left edge: justification adds no space.
+            assert!(l.lines.iter().all(|ln| ln.x0.abs() <= 1.5), "{align:?}: {:?}", l.lines.iter().map(|ln| ln.x0).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
     fn short_line_is_bigger_and_both_span_width() {
         let mut e = TextEngine::new();
         let (t, l) = solved(&mut e, fit_box("I AM A\nEXPANDABLE", 12.0, 400.0, 300.0));
