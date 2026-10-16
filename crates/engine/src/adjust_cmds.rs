@@ -374,6 +374,21 @@ pub fn replace_color_reduced(s: &mut Session, original: &photocraft_doc::Documen
     replace_color_apply(s, p, &samples, k.max(1))
 }
 
+/// How much Replace Color with `p` changes each pixel of `reduced` (row-major over its bounds,
+/// 0..=1): the pixels OK edits on `s`'s active document (the active layer, or the targeted mask or
+/// channel), here on `reduced`, a copy of it reduced by `k`, judged by OK's own samples: the
+/// dialog's Selection thumbnail. The selection is not applied; OK limits the change to it.
+pub fn replace_color_coverage(s: &Session, reduced: &Document, p: &Value, k: u32) -> Result<Vec<f32>> {
+    let p = crate::channel_cmds::inject_target(s, REPLACE_COLOR, p.clone());
+    let samples = replace_color_samples(s, &p)?;
+    let layer = crate::commands::layer_param(s, &Value::Null).ok();
+    let surf = crate::channel_cmds::read_target_surface(reduced, layer, &p)?;
+    let area = reduced.bounds();
+    let mut px = vec![[0.0f32; 4]; area.width() as usize * area.height() as usize];
+    surf.read_rgba_into(area, &mut px);
+    Ok(samples.coverage(&px, area.width() as usize, k.max(1) as f32, [0.0, 0.0]))
+}
+
 /// Straight RGBA pixels and an optional coverage mask for a document's layer (or its composite).
 /// Pixels plus an optional coverage mask.
 type Sample = (Vec<[f32; 4]>, Option<Vec<f32>>);
