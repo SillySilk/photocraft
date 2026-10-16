@@ -126,6 +126,11 @@ fn rgb_of(f: &Map<String, Value>, k: &str) -> Option<[f32; 3]> {
     f.get(k).and_then(Value::as_str).and_then(crate::color_picker_ui::parse_hex)
 }
 
+/// The From colour the Color swatch shows, if `color` is a valid colour.
+fn from_swatch(f: &Map<String, Value>) -> Option<[f32; 3]> {
+    rgb_of(f, "color")
+}
+
 /// Frame-start sync of the Result swatch (`__result`, a hex) with the From `color` and the Hue,
 /// Saturation and Lightness sliders.
 ///
@@ -241,12 +246,14 @@ pub(crate) fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<Strin
         }
         ui.add_space(8.0);
         ui.label(egui::RichText::new(&name).color(t.text_dim));
-        let rgb = f.get("color").and_then(Value::as_str).and_then(crate::color_picker_ui::parse_hex).unwrap_or([0.0; 3]);
-        let b = rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-        if widgets::color_swatch_button(ui, Color32::from_rgb(b[0], b[1], b[2]), &name).clicked() {
-            crate::color_picker_ui::request_field(f, "color", &crate::color_picker_ui::title_for(&name));
+        // No swatch without a valid From colour: nothing stands in for it.
+        if let Some(rgb) = from_swatch(f) {
+            let b = rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+            if widgets::color_swatch_button(ui, Color32::from_rgb(b[0], b[1], b[2]), &name).clicked() {
+                crate::color_picker_ui::request_field(f, "color", &crate::color_picker_ui::title_for(&name));
+            }
+            ui.label(egui::RichText::new(crate::color_picker_ui::hex(rgb)).color(t.text_dim).monospace());
         }
-        ui.label(egui::RichText::new(crate::color_picker_ui::hex(rgb)).color(t.text_dim).monospace());
     });
     ui.add_space(4.0);
     let slider = |ui: &mut egui::Ui, f: &mut Map<String, Value>, key: &str, range: std::ops::RangeInclusive<f32>, default: f32| {
@@ -671,6 +678,16 @@ mod tests {
         h.run_steps(2);
         assert_eq!(fields(h.state())["__view"], json!("selection"));
         assert!(crate::filter_dialog::params_of(&fields(h.state())).get("__view").is_none(), "view state is not an engine param");
+    }
+
+    #[test]
+    fn from_swatch_is_not_drawn_without_a_valid_colour() {
+        assert!(from_swatch(&Map::new()).is_none());
+        let mut f = Map::new();
+        f.insert("color".into(), json!("nope"));
+        assert!(from_swatch(&f).is_none(), "no black stand-in for an invalid From colour");
+        f.insert("color".into(), json!("#ff0000"));
+        assert_eq!(from_swatch(&f), Some([1.0, 0.0, 0.0]));
     }
 
     #[test]
