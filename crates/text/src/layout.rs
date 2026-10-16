@@ -580,6 +580,13 @@ impl Layouter {
             let sst = |ri: usize| unit_style.get(ri).copied().unwrap_or(ri);
             let content = &text[prange.start..content_end];
             let prefix = match ps.direction {
+                // A paragraph split into solved lines keeps the direction of its first strong
+                // character: parley would otherwise detect it again on each line.
+                TextDirection::Auto if !(unit.first && unit.last) => match text.get(unit.paragraph_text.clone()).and_then(first_strong_rtl) {
+                    Some(true) => RLM,
+                    Some(false) => LRM,
+                    None => "",
+                },
                 TextDirection::Auto => "",
                 TextDirection::Ltr => LRM,
                 TextDirection::Rtl => RLM,
@@ -1138,6 +1145,8 @@ struct Unit {
     /// End of the text shown (without a paragraph break, or a forced line break the unit ends at).
     content_end: usize,
     scale: f32,
+    /// The paragraph's text without its break.
+    paragraph_text: Range<usize>,
     /// The paragraph's first unit (first-line indent, space before) and last (space after).
     first: bool,
     last: bool,
@@ -1161,10 +1170,30 @@ fn break_units(text: &str, lines: &[FitLine]) -> Vec<Unit> {
                 // The solved break replaces a forced line break it follows.
                 Some(&z) => (a..z, if text.get(a..z).is_some_and(|s| s.ends_with(FORCED_LINE_BREAK)) { z - FORCED_LINE_BREAK.len_utf8() } else { z }),
             };
-            out.push(Unit { paragraph, range, content_end: end, scale: scale_at(a), first: j == 0, last: j + 1 == cuts.len() });
+            out.push(Unit {
+                paragraph,
+                range,
+                content_end: end,
+                scale: scale_at(a),
+                paragraph_text: prange.start..content_end,
+                first: j == 0,
+                last: j + 1 == cuts.len(),
+            });
         }
     }
     out
+}
+
+/// Whether the first strong character of `s` is right-to-left (UAX #9 P2, without isolates), or
+/// `None` when it has none.
+fn first_strong_rtl(s: &str) -> Option<bool> {
+    use icu_properties::{CodePointMapData, props::BidiClass};
+    let classes = CodePointMapData::<BidiClass>::new();
+    s.chars().find_map(|c| match classes.get(c) {
+        BidiClass::LeftToRight => Some(false),
+        BidiClass::RightToLeft | BidiClass::ArabicLetter => Some(true),
+        _ => None,
+    })
 }
 
 /// `st` at `scale` times its size, clamped to the type size range; explicit leading and baseline

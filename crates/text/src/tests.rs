@@ -2608,3 +2608,20 @@ fn fit_lines_narrower_than_the_box_follow_the_alignment() {
         assert!(((ln.x0 + ln.x1) / 2.0 - 200.0).abs() < 1.0, "centred in the box: {ln:?}");
     }
 }
+
+#[test]
+fn fit_lines_keep_the_paragraphs_auto_direction() {
+    // A Hebrew paragraph whose second solved line starts with a Latin word: that line still has
+    // the paragraph's RTL base, so the Hebrew after "abc" sits to its left.
+    let text = "שלום abc דג";
+    let mut t = box_layer(text, 20.0, (0.0, 0.0, 4000.0, 400.0));
+    t.fit = fit_lines(&[(0, 1.0), (9, 1.0)]);
+    let l = layout_of(&t);
+    let starts: Vec<usize> = l.lines.iter().map(|ln| ln.range.start).collect();
+    assert_eq!(starts, [0, 9], "{:?}", l.lines);
+    assert!(l.clusters.iter().all(|c| c.range.end <= text.len() && text.is_char_boundary(c.range.start)));
+    let at = |b: usize| l.clusters.iter().find(|c| c.range.start == b).unwrap_or_else(|| panic!("no cluster at {b}: {:?}", l.clusters));
+    assert!(at(9).line == 1 && at(13).line == 1);
+    assert!(at(13).rtl);
+    assert!(at(9).x > at(13).x, "RTL base: 'abc' right of the Hebrew: {:?} vs {:?}", at(9), at(13));
+}
