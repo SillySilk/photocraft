@@ -396,7 +396,7 @@ fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> (Vec<Se
             for c in clusters[first..].iter().take_while(|c| c.range.start < z) {
                 let piece = text.get(c.range.clone()).unwrap_or("");
                 let adv = if c.advance.is_finite() { c.advance } else { 0.0 };
-                if !piece.is_empty() && piece.chars().all(char::is_whitespace) {
+                if !piece.is_empty() && piece.chars().all(breaking_space) {
                     pending += adv;
                     in_word = false;
                     continue;
@@ -442,6 +442,13 @@ fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> (Vec<Se
         }
     }
     (out, visited)
+}
+
+/// Whitespace a line may break after (UAX #14 classes SP and BA). No-break spaces (GL, such
+/// as U+00A0 and U+202F) and word joiners stay inside their word.
+fn breaking_space(c: char) -> bool {
+    use icu_properties::{CodePointMapData, props::LineBreak as L};
+    c.is_whitespace() && matches!(CodePointMapData::<L>::new().get(c), L::Space | L::BreakAfter)
 }
 
 /// Whether `c` extends the grapheme before it (combining marks, spacing marks, ZWJ).
@@ -888,7 +895,8 @@ mod tests {
     fn lines_start_at_word_boundaries_not_inside_clusters() {
         let mut e = TextEngine::new();
         // Combining acute accents (U+0301) after base letters and after a space.
-        let text = "cafe\u{301} re\u{301}sume\u{301} \u{301}x na\u{ef}ve words here and there";
+        // No-break spaces (U+00A0, U+202F) glue their neighbours: never a line start after one.
+        let text = "cafe\u{301} re\u{301}sume\u{301} \u{301}x na\u{ef}ve words 10\u{a0}km here 5\u{202f}kg and 20\u{a0}km there 7\u{202f}kg";
         let (t, _) = solved(&mut e, fit_box(text, 12.0, 120.0, 400.0));
         let lines = &t.fit.as_ref().unwrap().lines;
         assert!(lines.len() >= 2, "{lines:?}");
