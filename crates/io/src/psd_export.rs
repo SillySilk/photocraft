@@ -629,6 +629,10 @@ impl Ex {
                     self.warnings
                         .push(format!("layer \"{}\": area type is saved as paragraph text over its path's bounds (PSD area type is not written yet)", l.name));
                 }
+                // Photoshop's own Dynamic Text data is not known: the layer saves at its fitted sizes.
+                if t.fit.is_some() {
+                    self.warnings.push(format!("layer \"{}\": Dynamic Text is saved as regular text", l.name));
+                }
                 // Text layers without PSD data (created here) get a generated TySh.
                 let generated = t.psd_raw.is_none().then(|| std::sync::Arc::new(photocraft_text::psd::build_tysh(t, self.dpi, None)));
                 let src = t.psd_raw.as_ref().or(generated.as_ref());

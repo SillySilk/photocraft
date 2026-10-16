@@ -226,3 +226,29 @@ fn locked_layer_is_refused() {
     assert!(s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap_err().to_string().contains("locked"));
     assert!(text(&s, id).fit.is_none());
 }
+
+#[test]
+fn psd_export_warns_for_dynamic_text() {
+    let (mut s, id) = session_with_box_text("Hello dynamic world", 12.0, [0.0, 0.0, 300.0, 100.0]);
+    let doc = s.active().unwrap().doc.clone();
+    let plain = photocraft_io::export(&doc, "x.psd", &photocraft_io::ExportOptions::default()).unwrap();
+    assert!(!plain.warnings.iter().any(|w| w.contains("Dynamic Text")), "{:?}", plain.warnings);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    let size = text(&s, id).size_pt;
+    let doc = s.active().unwrap().doc.clone();
+    let r = photocraft_io::export(&doc, "x.psd", &photocraft_io::ExportOptions::default()).unwrap();
+    assert!(r.warnings.iter().any(|w| w.contains("Dynamic Text is saved as regular text")), "{:?}", r.warnings);
+    // The PSD holds plain paragraph text at the fitted size.
+    let back = photocraft_io::import("x.psd", &r.bytes).unwrap().document;
+    let t = back
+        .walk()
+        .into_iter()
+        .find_map(|(_, _, l)| match &l.content {
+            LayerContent::Text(t) => Some(t.clone()),
+            _ => None,
+        })
+        .expect("still a type layer");
+    assert!(t.fit.is_none());
+    assert!(matches!(t.shape, TextShape::Box { .. }));
+    assert!((t.size_pt - size).abs() < 0.05, "{} vs {size}", t.size_pt);
+}
