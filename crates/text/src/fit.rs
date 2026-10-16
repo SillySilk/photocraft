@@ -262,7 +262,7 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
     let mut point = base.clone();
     point.shape = TextShape::Point;
     let measured = engine.layout(&point, dpi);
-    let (segs, visited) = segments(&base, &measured, k, box_w);
+    let Some((segs, visited)) = segments(&base, &measured, k, box_w) else { return none };
     if segs.is_empty() {
         return none;
     }
@@ -373,7 +373,8 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
 
 /// Splits the layer into segments of words measured in `m` (the layer laid out as point text).
 /// Also returns how many base layout lines it visited (tests check it stays linear).
-fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> (Vec<Segment>, usize) {
+/// None when a segment has no base layout line to measure.
+fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> Option<(Vec<Segment>, usize)> {
     use crate::layout::{FORCED_LINE_BREAK, split_paragraphs};
     let text = &t.text;
     let runs = t.char_runs();
@@ -439,18 +440,25 @@ fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> (Vec<Se
                 pending = 0.0;
                 in_word = true;
             }
-            // Ascent and descent per px from the base line(s) of this segment.
-            let (mut asc, mut desc) = (0.0f32, 0.0f32);
+            // Ascent and descent per px from the base line(s) of this segment: the font's real
+            // metrics as layout measured them. Point text gives every segment a line; if one
+            // has none, there is nothing true to stack it with, so the solver gives up.
+            let (mut asc, mut desc, mut found) = (0.0f32, 0.0f32, false);
             let from = lines.partition_point(|l| l.range.start < a);
             for l in lines[from..].iter().take_while(|l| l.range.start <= z) {
                 visited += 1;
+                found = true;
                 asc = asc.max(l.ascent);
                 desc = desc.max(l.descent);
+            }
+            if !found {
+                debug_assert!(found, "no base layout line for the segment at byte {a}");
+                return None;
             }
             let seg_pt = words.iter().map(|w| w.pt).fold(0.0f32, f32::max);
             let pt = pt_at(a);
             let px = if seg_pt > 0.0 { seg_pt } else { pt } * k;
-            let (ascent, descent) = if asc > 0.0 || desc > 0.0 { (asc / px, desc / px) } else { (0.8, 0.2) };
+            let (ascent, descent) = (asc / px, desc / px);
             out.push(Segment {
                 start: a,
                 words,
@@ -465,7 +473,7 @@ fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> (Vec<Se
             });
         }
     }
-    (out, visited)
+    Some((out, visited))
 }
 
 /// Whitespace a line may break after (UAX #14 classes SP and BA). No-break spaces (GL, such
