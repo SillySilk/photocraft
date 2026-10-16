@@ -2448,3 +2448,163 @@ fn fit_ignores_explicit_and_auto_leading() {
     // The natural height is the line's ascent plus descent, less than 1.2 × size here.
     assert!(natural > 15.0 && natural < 30.0, "{natural}");
 }
+
+// Dynamic Text box lines: the solver's `lines` force the breaks and size each line.
+
+fn fit_lines(lines: &[(u32, f32)]) -> Option<TextFit> {
+    Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: lines.iter().map(|&(start, scale)| photocraft_doc::text::FitLine { start, scale }).collect() })
+}
+
+/// Em sizes (px) of the glyphs sitting on each line's baseline.
+fn line_sizes(l: &crate::TextLayout) -> Vec<Vec<f32>> {
+    l.lines.iter().map(|ln| l.glyphs.iter().filter(|g| (g.y - ln.baseline).abs() < 0.5).map(|g| l.faces[g.face as usize].size_px).collect()).collect()
+}
+
+fn same_layout(a: &crate::TextLayout, b: &crate::TextLayout) -> bool {
+    format!("{:?}{:?}{:?}{:?}", a.lines, a.glyphs, a.clusters, a.overflowed) == format!("{:?}{:?}{:?}{:?}", b.lines, b.glyphs, b.clusters, b.overflowed)
+}
+
+#[test]
+fn fit_lines_force_breaks() {
+    let mut t = box_layer("aa bb cc", 20.0, (0.0, 0.0, 4000.0, 400.0));
+    t.fit = fit_lines(&[(0, 1.0), (3, 1.0), (6, 1.0)]);
+    let l = layout_of(&t);
+    let starts: Vec<usize> = l.lines.iter().map(|ln| ln.range.start).collect();
+    assert_eq!(starts, [0, 3, 6], "{:?}", l.lines);
+    assert!(!l.overflowed);
+}
+
+#[test]
+fn fit_lines_keep_paragraphs() {
+    let mut t = box_layer("aa bb\ncc", 20.0, (0.0, 0.0, 4000.0, 400.0));
+    t.fit = fit_lines(&[(0, 1.0), (3, 1.0), (6, 1.0)]);
+    let l = layout_of(&t);
+    let got: Vec<(usize, usize)> = l.lines.iter().map(|ln| (ln.range.start, ln.paragraph)).collect();
+    assert_eq!(got, [(0, 0), (3, 0), (6, 1)], "{:?}", l.lines);
+}
+
+#[test]
+fn fit_lines_scale_sizes() {
+    let mut t = box_layer("aa bb", 20.0, (0.0, 0.0, 4000.0, 400.0));
+    t.fit = fit_lines(&[(0, 1.0)]);
+    let base = layout_of(&t);
+    t.fit = fit_lines(&[(0, 2.0), (3, 0.5)]);
+    let l = layout_of(&t);
+    assert_eq!(l.lines.len(), 2, "{:?}", l.lines);
+    let px = 20.0 * l.px_per_pt;
+    let sizes = line_sizes(&l);
+    assert!(!sizes[0].is_empty() && sizes[0].iter().all(|s| (s / (2.0 * px) - 1.0).abs() < 0.02), "{sizes:?}");
+    assert!(!sizes[1].is_empty() && sizes[1].iter().all(|s| (s / (0.5 * px) - 1.0).abs() < 0.02), "{sizes:?}");
+    let a = base.lines[0].ascent;
+    assert!((l.lines[0].ascent / a - 2.0).abs() < 0.04 && (l.lines[1].ascent / a - 0.5).abs() < 0.01, "{:?} vs {a}", l.lines);
+}
+
+#[test]
+fn fit_lines_advance_uses_each_lines_scaled_size() {
+    let mut t = box_layer("aa bb", 20.0, (0.0, 0.0, 4000.0, 400.0));
+    t.fit = fit_lines(&[(0, 2.0), (3, 0.5)]);
+    t.fit.as_mut().unwrap().line_gap = 100.0;
+    let l = layout_of(&t);
+    let (l0, l1) = (&l.lines[0], &l.lines[1]);
+    // The second line's leading: its own (scaled) height plus 100% of its scaled size.
+    let want = l1.ascent + l1.descent + 0.5 * 20.0 * l.px_per_pt;
+    assert!((l1.baseline - l0.baseline - want).abs() < 0.5, "{:?}", l.lines);
+}
+
+#[test]
+fn fit_lines_scale_word_gap_and_baseline_shift() {
+    let style = CharStyle { font_family: "Inter".into(), size_pt: 20.0, baseline_shift_pt: 4.0, ..Default::default() };
+    let mut t = styled("aa bb", style);
+    t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 4000.0, height: 400.0 };
+    t.fit = fit_lines(&[(0, 2.0)]);
+    let w0 = layout_of(&t).lines[0].x1;
+    t.fit.as_mut().unwrap().word_gap = 100.0;
+    let l = layout_of(&t);
+    let px = 20.0 * l.px_per_pt;
+    assert!((l.lines[0].x1 - w0 - 2.0 * px).abs() < 1.0, "the space widens by its scaled size: {w0} -> {}", l.lines[0].x1);
+    assert!(l.glyphs.iter().all(|g| l.styles[g.style as usize].baseline_shift_pt == 8.0), "baseline shift scales with the line");
+}
+
+#[test]
+fn fit_lines_wider_than_box_do_not_rewrap() {
+    // A clamped line wider than the box keeps its words together and reports overflow.
+    let mut t = box_layer("aa bb cc", 20.0, (0.0, 0.0, 60.0, 400.0));
+    t.fit = fit_lines(&[(0, 1.0), (3, 3.0)]);
+    let l = layout_of(&t);
+    let starts: Vec<usize> = l.lines.iter().map(|ln| ln.range.start).collect();
+    assert_eq!(starts, [0, 3], "{:?}", l.lines);
+    assert!(l.lines[1].x1 - l.lines[1].x0 > 60.5);
+    assert!(l.overflowed);
+}
+
+#[test]
+fn fit_lines_box_height_still_stops_lines() {
+    let mut t = box_layer("aa bb cc", 20.0, (0.0, 0.0, 4000.0, 40.0));
+    t.fit = fit_lines(&[(0, 1.0), (3, 1.0), (6, 1.0)]);
+    let l = layout_of(&t);
+    assert!(l.lines.len() < 3, "{:?}", l.lines);
+    assert!(l.overflowed);
+}
+
+#[test]
+fn fit_lines_ignored_without_fit_or_for_area() {
+    let lines = fit_lines(&[(0, 2.0), (3, 0.5), (6, 1.0)]);
+    let text = "aa bb cc dd ee ff";
+    // No fit: plain box text.
+    let plain = layout_of(&box_layer(text, 20.0, (0.0, 0.0, 60.0, 400.0)));
+    assert!(plain.lines.len() > 1 && plain.glyphs.iter().all(|g| plain.faces[g.face as usize].size_px == 20.0 * plain.px_per_pt));
+    // Area text keeps its uniform fit: lines change nothing.
+    let mut a = area_ellipse_layer(text, 12.0, 120.0, 120.0);
+    a.fit = Some(TextFit::default());
+    let without = layout_of(&a);
+    a.fit = lines.clone();
+    assert!(same_layout(&without, &layout_of(&a)));
+    // So does point text.
+    let mut p = point(text, 20.0);
+    p.fit = Some(TextFit::default());
+    let without = layout_of(&p);
+    p.fit = lines;
+    assert!(same_layout(&without, &layout_of(&p)));
+}
+
+#[test]
+fn fit_lines_not_solved_yet_wrap_normally() {
+    // Refresh always fills `lines`; until it has run, a fitted box wraps at its width.
+    let mut t = box_layer("alpha beta gamma delta", 20.0, (0.0, 0.0, 150.0, 300.0));
+    t.fit = Some(TextFit::default());
+    let l = layout_of(&t);
+    assert_eq!(l.lines.len(), 2, "{:?}", l.lines);
+    assert!(l.lines.iter().all(|ln| ln.x1 - ln.x0 <= 150.5));
+}
+
+#[test]
+fn fit_lines_invalid_for_the_text_are_ignored() {
+    // Out of order: laid out as if not solved yet, never panicking on a bad offset.
+    let mut t = box_layer("héllo world", 20.0, (0.0, 0.0, 4000.0, 300.0));
+    t.fit = Some(TextFit::default());
+    let unsolved = layout_of(&t);
+    for bad in [&[(0, 1.0), (2, 1.0)][..], &[(0, 1.0), (7, 1.0), (3, 1.0)], &[(0, 1.0), (99, 1.0)]] {
+        t.fit = fit_lines(bad);
+        assert!(same_layout(&unsolved, &layout_of(&t)), "{bad:?}");
+    }
+}
+
+#[test]
+fn fit_line_after_a_forced_line_break_adds_no_blank_line() {
+    let mut t = box_layer("aa\u{3}bb", 20.0, (0.0, 0.0, 4000.0, 400.0));
+    t.fit = fit_lines(&[(0, 1.0), (3, 1.0)]);
+    let l = layout_of(&t);
+    let starts: Vec<usize> = l.lines.iter().map(|ln| ln.range.start).collect();
+    assert_eq!(starts, [0, 3], "{:?}", l.lines);
+}
+
+#[test]
+fn fit_lines_narrower_than_the_box_follow_the_alignment() {
+    let t = box_layer("aa bb", 20.0, (0.0, 0.0, 400.0, 400.0));
+    let mut t = with_para(t, ParagraphStyle { align: TextAlign::Center, ..Default::default() });
+    t.fit = fit_lines(&[(0, 1.0), (3, 0.5)]);
+    let l = layout_of(&t);
+    for ln in &l.lines {
+        assert!(((ln.x0 + ln.x1) / 2.0 - 200.0).abs() < 1.0, "centred in the box: {ln:?}");
+    }
+}

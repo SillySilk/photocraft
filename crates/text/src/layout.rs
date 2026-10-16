@@ -19,10 +19,10 @@ use std::ops::Range;
 
 use parley::{
     Alignment, AlignmentOptions, FontData, FontFamily, FontFeatures, FontStyle, FontVariations, FontWeight, IndentOptions, Layout, LayoutContext,
-    PositionedLayoutItem, StyleProperty,
+    PositionedLayoutItem, StyleProperty, TextWrapMode,
 };
 use photocraft_doc::TextLayer;
-use photocraft_doc::text::{Caps, CharStyle, Kerning, Orientation, ParagraphStyle, TextAlign, TextDirection, TextFit, TextShape};
+use photocraft_doc::text::{Caps, CharStyle, FitLine, Kerning, Orientation, ParagraphStyle, TextAlign, TextDirection, TextFit, TextShape};
 use skrifa::raw::types::Tag;
 
 use crate::fonts::FontDb;
@@ -210,7 +210,8 @@ pub struct TextLayout {
     pub decorations: Vec<DecorationRect>,
     pub lines: Vec<LineInfo>,
     pub clusters: Vec<ClusterInfo>,
-    /// Resolved character styles (one per run of the layer).
+    /// Resolved character styles: one per run of the layer, then for Dynamic Text box lines not
+    /// at scale 1, scaled copies the glyphs of those lines use.
     pub styles: Vec<CharStyle>,
     /// Pixels per point used (dpi / 72).
     pub px_per_pt: f32,
@@ -544,12 +545,39 @@ impl Layouter {
                 _ => SmallCapsMode::None,
             })
             .collect();
-        for (pi, prange) in split_paragraphs(text).into_iter().enumerate() {
+        // Dynamic Text box lines (the fit solver's output): each line starts where the solver
+        // chose and is laid out at its own scale, without wrapping. Empty until the first refresh
+        // solves them; area and point text don't use them.
+        let fit_lines: &[FitLine] = match &t.fit {
+            Some(f) if is_box => f.valid_lines(text),
+            _ => &[],
+        };
+        let solved = !fit_lines.is_empty();
+        for unit in break_units(text, fit_lines) {
             if stop {
                 break;
             }
+            let (pi, prange, content_end) = (unit.paragraph, unit.range.clone(), unit.content_end);
             let ps = para_style_at(prange.start).clone();
-            let content_end = strip_break(text, &prange);
+            // This unit's style for each run: its own, or for a solved line not at scale 1, a copy
+            // at that line's scale (appended to `out.styles`, so render reads the scaled baseline
+            // shift). Only runs the unit touches are copied.
+            let mut unit_style: Vec<usize> = Vec::new();
+            if unit.scale != 1.0 {
+                let first_run = style_at(prange.start);
+                for ri in 0..runs.len() {
+                    let (rs, re) = (run_starts[ri], run_starts[ri] + runs[ri].len);
+                    let touches = ri == first_run || (rs < content_end && re > prange.start);
+                    unit_style.push(if touches {
+                        let scaled = scaled_style(&out.styles[ri], unit.scale);
+                        out.styles.push(scaled);
+                        out.styles.len() - 1
+                    } else {
+                        ri
+                    });
+                }
+            }
+            let sst = |ri: usize| unit_style.get(ri).copied().unwrap_or(ri);
             let content = &text[prange.start..content_end];
             let prefix = match ps.direction {
                 TextDirection::Auto => "",
@@ -581,7 +609,7 @@ impl Layouter {
                     ptext.push(' ');
                     continue;
                 }
-                let style = &out.styles[style_at(prange.start + i)];
+                let style = &out.styles[sst(style_at(prange.start + i))];
                 let caps = style.caps;
                 if caps == Caps::AllCaps || small_caps[style_at(prange.start + i)] == SmallCapsMode::Synthetic {
                     let up: String = ch.to_uppercase().collect();
@@ -596,7 +624,7 @@ impl Layouter {
                 }
                 ptext.push(ch);
             }
-            let first_style = &out.styles[style_at(prange.start)];
+            let first_style = &out.styles[sst(style_at(prange.start))];
             let first_px = first_style.size_pt * k;
             // Scripts the loaded fonts may lack (Arabic, Japanese, …): a host serving a font for them
             // fetches it (`served`); it joins the fallback stack once it arrives.
@@ -608,20 +636,27 @@ impl Layouter {
                 // Paragraph-start style as the default (covers the direction mark and empty
                 // paragraphs), then every run piece intersecting this paragraph.
                 let si0 = style_at(prange.start);
-                for p in style_props(&out.styles[si0], k, &fallback, si0 as u32, small_caps[si0]) {
+                let ui0 = sst(si0);
+                for p in style_props(&out.styles[ui0], k, &fallback, ui0 as u32, small_caps[si0]) {
                     b.push_default(p);
                 }
                 if let Some((word_gap, _)) = gaps {
-                    b.push_default(StyleProperty::WordSpacing(word_gap / 100.0 * out.styles[si0].size_pt * k));
+                    b.push_default(StyleProperty::WordSpacing(word_gap / 100.0 * out.styles[ui0].size_pt * k));
                 }
-                for (ri, st) in out.styles.iter().enumerate() {
+                // A solved line is already broken: it never wraps, even when wider than the box.
+                if solved {
+                    b.push_default(StyleProperty::TextWrapMode(TextWrapMode::NoWrap));
+                }
+                for ri in 0..runs.len() {
+                    let ui = sst(ri);
+                    let st = &out.styles[ui];
                     let rs = run_starts[ri];
                     let (a, z) = (rs.max(prange.start), (rs + runs[ri].len).min(content_end));
                     if a >= z {
                         continue;
                     }
                     let range = (a - prange.start + prefix.len())..(z - prange.start + prefix.len());
-                    for p in style_props(st, k, &fallback, ri as u32, small_caps[ri]) {
+                    for p in style_props(st, k, &fallback, ui as u32, small_caps[ri]) {
                         b.push(p, range.clone());
                     }
                     // Parley widens each space (U+0020 and no-break space) by the word spacing.
@@ -640,7 +675,7 @@ impl Layouter {
                             feats.push("\"vert\" 1".into());
                             let r = (range.start + from)..(range.start + to);
                             b.push(StyleProperty::FontFeatures(FontFeatures::Source(Cow::Owned(feats.join(", ")))), r.clone());
-                            b.push(StyleProperty::Brush(RunBrush(ri as u32, cls as u8)), r);
+                            b.push(StyleProperty::Brush(RunBrush(ui as u32, cls as u8)), r);
                         };
                         for (i, ch) in piece.char_indices() {
                             let cls = vertical_class(ch);
@@ -668,13 +703,14 @@ impl Layouter {
             };
             let indent_start = ps.start_indent_pt * k;
             let indent_end = ps.end_indent_pt * k;
-            let first_indent = ps.first_line_indent_pt * k;
+            // Only a paragraph's first line takes the first-line indent.
+            let first_indent = if unit.first { ps.first_line_indent_pt * k } else { 0.0 };
             // Box extent along the lines: width, or height for vertical type (columns).
             let (line_origin, line_len) = if vertical { (box_rect.1, box_rect.3) } else { (box_rect.0, box_rect.2) };
             let avail = if is_box { Some((line_len - indent_start - indent_end).max(1.0)) } else { None };
             // Area type: the first row goes no higher than one leading (plus paragraph spacing)
             // below the previous paragraph's last line.
-            let space_before = if prev_baseline.is_some() { ps.space_before_pt * k } else { 0.0 };
+            let space_before = if prev_baseline.is_some() && unit.first { ps.space_before_pt * k } else { 0.0 };
             let area_from = |m: LineMetrics| match (&area, prev_baseline) {
                 (Some(_), Some(b)) => b + m.leading + pending_space + space_before,
                 (Some(a), None) => a.bounds[1] + m.ascent,
@@ -734,7 +770,7 @@ impl Layouter {
             layout.align(alignment, AlignmentOptions { align_when_overflowing: !wraps });
 
             // Stack lines.
-            if prev_baseline.is_some() {
+            if prev_baseline.is_some() && unit.first {
                 pending_space += ps.space_before_pt * k;
             }
             let nlines = layout.len();
@@ -820,8 +856,8 @@ impl Layouter {
                     if a.start < prefix.len() {
                         continue;
                     }
-                    let st = &out.styles[style_at(map(a.start))];
-                    let next = &out.styles[style_at(map(b.start))];
+                    let st = &out.styles[sst(style_at(map(a.start)))];
+                    let next = &out.styles[sst(style_at(map(b.start)))];
                     let mut units = if st.kern.is_finite() { st.kern } else { 0.0 };
                     // Optical pairs: both characters optical (a mode change splits shaping
                     // runs, which ends automatic kerning, as with Metrics).
@@ -1085,10 +1121,63 @@ impl Layouter {
                 out.overflowed |= hides_text(shown_end);
                 stop = true;
             }
-            pending_space += ps.space_after_pt * k;
+            if unit.last {
+                pending_space += ps.space_after_pt * k;
+            }
         }
         out
     }
+}
+
+/// Text laid out as one parley paragraph: a whole paragraph, or with solved Dynamic Text box
+/// lines, one line of it.
+struct Unit {
+    paragraph: usize,
+    /// Byte range in the layer text; the paragraph's last unit includes its break.
+    range: Range<usize>,
+    /// End of the text shown (without a paragraph break, or a forced line break the unit ends at).
+    content_end: usize,
+    scale: f32,
+    /// The paragraph's first unit (first-line indent, space before) and last (space after).
+    first: bool,
+    last: bool,
+}
+
+/// Paragraphs, each split at the starts of `lines` (valid solved Dynamic Text lines, else empty)
+/// that fall inside its text. A unit takes the scale of the line it starts in.
+fn break_units(text: &str, lines: &[FitLine]) -> Vec<Unit> {
+    let scale_at = |off: usize| {
+        let i = lines.partition_point(|l| l.start as usize <= off);
+        i.checked_sub(1).and_then(|i| lines.get(i)).map_or(1.0, |l| l.scale)
+    };
+    let mut out = Vec::new();
+    for (paragraph, prange) in split_paragraphs(text).into_iter().enumerate() {
+        let content_end = strip_break(text, &prange);
+        let mut cuts = vec![prange.start];
+        cuts.extend(lines.iter().map(|l| l.start as usize).filter(|&s| s > prange.start && s < content_end));
+        for (j, &a) in cuts.iter().enumerate() {
+            let (range, end) = match cuts.get(j + 1) {
+                None => (a..prange.end, content_end),
+                // The solved break replaces a forced line break it follows.
+                Some(&z) => (a..z, if text.get(a..z).is_some_and(|s| s.ends_with(FORCED_LINE_BREAK)) { z - FORCED_LINE_BREAK.len_utf8() } else { z }),
+            };
+            out.push(Unit { paragraph, range, content_end: end, scale: scale_at(a), first: j == 0, last: j + 1 == cuts.len() });
+        }
+    }
+    out
+}
+
+/// `st` at `scale` times its size, clamped to the type size range; explicit leading and baseline
+/// shift follow the size.
+fn scaled_style(st: &CharStyle, scale: f32) -> CharStyle {
+    let mut s = st.clone();
+    if st.size_pt.is_finite() && st.size_pt > 0.0 {
+        s.size_pt = (st.size_pt * scale).clamp(crate::fit::MIN_PT, crate::fit::MAX_PT);
+        let r = s.size_pt / st.size_pt;
+        s.leading_pt = st.leading_pt.map(|l| l * r);
+        s.baseline_shift_pt = st.baseline_shift_pt * r;
+    }
+    s
 }
 
 /// The first tab stop after `pos` (px from the anchor or box edge); stops are `interval` apart.
