@@ -501,7 +501,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "image.adjustments.replaceColor",
             "Replace Color…",
             ["Image", "Adjustments"],
-            r##"{"localized":bool=false,"color":color,"fuzziness":0..200=40,"range":0..100=100,"hue":-180..180=0,"saturation":-100..100=0,"lightness":-100..100=0,"points":[[x,y],…]?,"subtractPoints":[[x,y],…]?,"order":["+"|"-",…]?} (color: "#rrggbb", default the foreground colour; "points"/"subtractPoints": eyedropper samples read from the merged image at those document pixels, "order": the click order as in select.colorRange; Localized Color Clusters needs "points", "range" % of the longer side)"##,
+            r##"{"localized":bool=false,"color":color,"colors":["#rrggbb",…]?,"fuzziness":0..200=40,"range":0..100=100,"hue":-180..180=0,"saturation":-100..100=0,"lightness":-100..100=0,"points":[[x,y],…]?,"subtractPoints":[[x,y],…]?,"order":["+"|"-",…]?,"sampleAllLayers":bool=true} (color: "#rrggbb", default the foreground colour when neither "color", "colors" nor "points" is given; "colors": more fixed colours to match; the match spans "color", "colors" and "points" together; "points"/"subtractPoints": eyedropper samples at those document pixels, read from the merged image, or from the active layer with "sampleAllLayers": false; "order": the click order as in select.colorRange; Localized Color Clusters needs "points", "range" % of the longer side)"##,
             has_pixels,
             replace_color
         ),
