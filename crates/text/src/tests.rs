@@ -1,6 +1,6 @@
 use photocraft_color::{Color, PixelFormat, SampleType};
 use photocraft_doc::TextLayer;
-use photocraft_doc::text::{Caps, CharStyle, FontFeature, Orientation, ParagraphRun, ParagraphStyle, TextAlign, TextDirection, TextRun, TextShape};
+use photocraft_doc::text::{Caps, CharStyle, FontFeature, Orientation, ParagraphRun, ParagraphStyle, TextAlign, TextDirection, TextFit, TextRun, TextShape};
 use photocraft_geom::Affine;
 
 use crate::{TextEngine, fonts};
@@ -2239,4 +2239,119 @@ fn area_justify_fills_each_span_but_the_last_line() {
     // The last line is set flush left, not stretched.
     let (s0, s1) = span_of(last);
     assert!((last.x0 - s0).abs() < 1.0 && last.x1 < s1 - 12.0, "{last:?} in {s0}..{s1}");
+}
+
+// Dynamic Text: overflow reporting and fit gaps.
+
+fn box_layer(text: &str, size_pt: f32, (x, y, width, height): (f32, f32, f32, f32)) -> TextLayer {
+    let mut t = point(text, size_pt);
+    t.shape = TextShape::Box { x, y, width, height };
+    t
+}
+
+fn area_ellipse_layer(text: &str, size_pt: f32, w: f64, h: f64) -> TextLayer {
+    let mut t = point(text, size_pt);
+    t.shape = TextShape::Area { path: area_ellipse(0.0, 0.0, w, h) };
+    t
+}
+
+fn layout_of(t: &TextLayer) -> crate::TextLayout {
+    TextEngine::new().layout(t, 72.0)
+}
+
+#[test]
+fn fit_none_layout_is_unchanged_by_gaps_code() {
+    let t = box_layer("alpha beta gamma delta", 20.0, (0.0, 0.0, 150.0, 300.0));
+    let a = layout_of(&t);
+    let mut t2 = t.clone();
+    t2.fit = Some(TextFit::default());
+    let b = layout_of(&t2);
+    // fit Some with zero gaps uses natural line height instead of auto leading, so only the
+    // fit-None layout is pinned to the old numbers: compare against a snapshot taken before
+    // this change.
+    assert_eq!(a.lines.len(), 2);
+    // Baselines and extents read before the gaps code existed.
+    for (line, (baseline, x0, x1)) in a.lines.iter().zip([(14.550781, 0.0, 98.7793), (38.55078, 0.0, 122.30469)]) {
+        assert!((line.baseline - baseline).abs() < 1e-3 && (line.x0 - x0).abs() < 1e-3 && (line.x1 - x1).abs() < 1e-3, "{line:?}");
+    }
+    assert!(!a.overflowed);
+    assert!(!b.lines.is_empty());
+}
+
+#[test]
+fn box_overflow_is_reported() {
+    let mut t = box_layer("one two three four five six seven eight nine ten", 24.0, (0.0, 0.0, 120.0, 40.0));
+    assert!(layout_of(&t).overflowed, "ten words at 24pt can't fit 120x40");
+    t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 2000.0, height: 2000.0 };
+    assert!(!layout_of(&t).overflowed);
+}
+
+#[test]
+fn too_wide_word_is_overflow() {
+    let t = box_layer("Supercalifragilistic", 48.0, (0.0, 0.0, 60.0, 400.0));
+    assert!(layout_of(&t).overflowed);
+}
+
+#[test]
+fn area_overflow_is_reported() {
+    let t = area_ellipse_layer(&"word ".repeat(200), 18.0, 200.0, 120.0);
+    assert!(layout_of(&t).overflowed);
+    let t = area_ellipse_layer("hi", 18.0, 200.0, 120.0);
+    assert!(!layout_of(&t).overflowed);
+}
+
+#[test]
+fn area_word_wider_than_every_span_is_overflow() {
+    use photocraft_doc::vector::Subpath;
+    // Two 40 px columns: the long word is shown overflowing its span, not hidden.
+    let mut t = point("Wonderfulness is a long word", 12.0);
+    t.shape = TextShape::Area {
+        path: photocraft_doc::vector::Path::new(vec![
+            Subpath::polygon(&[(0.0, 0.0), (40.0, 0.0), (40.0, 200.0), (0.0, 200.0)]),
+            Subpath::polygon(&[(160.0, 0.0), (200.0, 0.0), (200.0, 200.0), (160.0, 200.0)]),
+        ]),
+    };
+    let l = layout_of(&t);
+    assert_eq!(l.lines.last().map(|line| line.range.end), Some(t.text.len()), "nothing hidden");
+    assert!(l.overflowed);
+}
+
+#[test]
+fn point_and_path_text_never_overflow() {
+    let t = point(&"word ".repeat(200), 48.0);
+    assert!(!layout_of(&t).overflowed);
+}
+
+#[test]
+fn line_gap_spreads_lines() {
+    let mut t = box_layer(
+        "a
+b",
+        20.0,
+        (0.0, 0.0, 400.0, 400.0),
+    );
+    t.fit = Some(TextFit { word_gap: 0.0, line_gap: 0.0 });
+    let l0 = layout_of(&t);
+    t.fit = Some(TextFit { word_gap: 0.0, line_gap: 100.0 });
+    let l1 = layout_of(&t);
+    let step = |l: &crate::TextLayout| l.lines[1].baseline - l.lines[0].baseline;
+    let px = 20.0 * l0.px_per_pt;
+    assert!((step(&l1) - step(&l0) - px).abs() < 0.5, "100% line gap adds one size: {} vs {}", step(&l1), step(&l0));
+}
+
+#[test]
+fn word_gap_widens_lines() {
+    let mut t = box_layer("aa bb cc dd", 20.0, (0.0, 0.0, 4000.0, 400.0));
+    t.fit = Some(TextFit::default());
+    let w0 = {
+        let l = layout_of(&t);
+        l.lines[0].x1 - l.lines[0].x0
+    };
+    t.fit = Some(TextFit { word_gap: 100.0, line_gap: 0.0 });
+    let w1 = {
+        let l = layout_of(&t);
+        l.lines[0].x1 - l.lines[0].x0
+    };
+    let px = 20.0 * layout_of(&t).px_per_pt;
+    assert!((w1 - w0 - 3.0 * px).abs() < 1.0, "three spaces each widen by one size: {w0} -> {w1}");
 }
