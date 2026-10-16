@@ -276,7 +276,8 @@ pub struct FitLine {
 }
 
 /// Dynamic Text (Photoshop 26.8 "Block" / "Dynamic fit"): the layer's sizes are derived so its
-/// text fills its box or area. Gaps are percentages of the font size.
+/// text fills its box or area. The word gap is a percent of each space's own width (-100 removes
+/// the spaces, +100 doubles them); the line gap is a percent of the font size.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TextFit {

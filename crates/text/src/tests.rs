@@ -2343,17 +2343,17 @@ b",
 fn word_gap_widens_lines() {
     let mut t = box_layer("aa bb cc dd", 20.0, (0.0, 0.0, 4000.0, 400.0));
     t.fit = Some(TextFit::default());
-    let w0 = {
-        let l = layout_of(&t);
-        l.lines[0].x1 - l.lines[0].x0
-    };
+    let l0 = layout_of(&t);
+    let w0 = l0.lines[0].x1 - l0.lines[0].x0;
+    // The word gap is a percent of each space's own width: +100 % doubles every space.
+    let space = l0.clusters.iter().find(|c| c.range.start == 2).map(|c| c.advance).unwrap();
+    assert!(space > 1.0 && space < 0.5 * 20.0 * l0.px_per_pt, "a space is narrower than the size: {space}");
     t.fit = Some(TextFit { word_gap: 100.0, line_gap: 0.0, lines: vec![] });
     let w1 = {
         let l = layout_of(&t);
         l.lines[0].x1 - l.lines[0].x0
     };
-    let px = 20.0 * layout_of(&t).px_per_pt;
-    assert!((w1 - w0 - 3.0 * px).abs() < 1.0, "three spaces each widen by one size: {w0} -> {w1}");
+    assert!((w1 - w0 - 3.0 * space).abs() < 1.0, "three spaces each widen by one space: {w0} -> {w1} (space {space})");
 }
 
 #[test]
@@ -2517,11 +2517,12 @@ fn fit_lines_scale_word_gap_and_baseline_shift() {
     let mut t = styled("aa bb", style);
     t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 4000.0, height: 400.0 };
     t.fit = fit_lines(&[(0, 2.0)]);
-    let w0 = layout_of(&t).lines[0].x1;
+    let l0 = layout_of(&t);
+    let w0 = l0.lines[0].x1;
+    let space = l0.clusters.iter().find(|c| c.range.start == 2).map(|c| c.advance).unwrap();
     t.fit.as_mut().unwrap().word_gap = 100.0;
     let l = layout_of(&t);
-    let px = 20.0 * l.px_per_pt;
-    assert!((l.lines[0].x1 - w0 - 2.0 * px).abs() < 1.0, "the space widens by its scaled size: {w0} -> {}", l.lines[0].x1);
+    assert!((l.lines[0].x1 - w0 - space).abs() < 1.0, "the space doubles at its scaled width: {w0} -> {} (space {space})", l.lines[0].x1);
     assert!(l.glyphs.iter().all(|g| l.styles[g.style as usize].baseline_shift_pt == 8.0), "baseline shift scales with the line");
 }
 

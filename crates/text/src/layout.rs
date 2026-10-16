@@ -472,8 +472,8 @@ impl Layouter {
         let runs = t.char_runs();
         let paras = t.paragraph_runs();
         let vertical = t.orientation == Orientation::Vertical;
-        // Dynamic Text: a word gap widens each space and a line gap replaces the leading, both
-        // percent of the font size. None lays out exactly as before.
+        // Dynamic Text: a word gap widens each space (percent of its own width) and a line gap
+        // replaces the leading (percent of the font size). None lays out exactly as before.
         let gaps = t.fit.as_ref().map(TextFit::gaps);
         let line_gap = gaps.map(|(_, line)| line);
         let mut out = TextLayout { px_per_pt: k, vertical, ..Default::default() };
@@ -653,8 +653,13 @@ impl Layouter {
             }
             let first_style = &out.styles[sst(style_at(prange.start))];
             let first_px = first_style.size_pt * k;
-            // Shapes the paragraph, each tab widened by its letter spacing in `tab_spacing` (px).
-            let build = |lcx: &mut LayoutContext<RunBrush>, fcx: &mut parley::FontContext, tab_spacing: &[f32]| -> Layout<RunBrush> {
+            // Shapes the paragraph, each tab widened by its letter spacing in `tab_spacing` (px)
+            // and each space in `word_spacing` (range in `ptext`, px) by its word spacing.
+            let build = |lcx: &mut LayoutContext<RunBrush>,
+                         fcx: &mut parley::FontContext,
+                         tab_spacing: &[f32],
+                         word_spacing: &[(Range<usize>, f32)]|
+             -> Layout<RunBrush> {
                 let mut b = lcx.ranged_builder(fcx, &ptext, 1.0, false);
                 // Paragraph-start style as the default (covers the direction mark and empty
                 // paragraphs), then every run piece intersecting this paragraph.
@@ -662,9 +667,6 @@ impl Layouter {
                 let ui0 = sst(si0);
                 for p in style_props(&out.styles[ui0], k, fallback, ui0 as u32, small_caps[si0]) {
                     b.push_default(p);
-                }
-                if let Some((word_gap, _)) = gaps {
-                    b.push_default(StyleProperty::WordSpacing(word_gap / 100.0 * out.styles[ui0].size_pt * k));
                 }
                 // A solved line is already broken: it never wraps, even when wider than the box.
                 if solved {
@@ -681,10 +683,6 @@ impl Layouter {
                     let range = (a - prange.start + prefix.len())..(z - prange.start + prefix.len());
                     for p in style_props(st, k, fallback, ui as u32, small_caps[ri]) {
                         b.push(p, range.clone());
-                    }
-                    // Parley widens each space (U+0020 and no-break space) by the word spacing.
-                    if let Some((word_gap, _)) = gaps {
-                        b.push(StyleProperty::WordSpacing(word_gap / 100.0 * st.size_pt * k), range.clone());
                     }
                     if vertical {
                         // Upright pieces get the vertical alternates and their class in the brush.
@@ -721,6 +719,10 @@ impl Layouter {
                 }
                 for (&at, &spacing) in tabs.iter().zip(tab_spacing) {
                     b.push(StyleProperty::LetterSpacing(spacing), at..at + 1);
+                }
+                // Parley widens each space (U+0020 and no-break space) by the word spacing.
+                for (range, spacing) in word_spacing {
+                    b.push(StyleProperty::WordSpacing(*spacing), range.clone());
                 }
                 b.build(&ptext)
             };
@@ -761,14 +763,24 @@ impl Layouter {
             // Break again with the tab widths that layout gives until they agree; if they don't
             // settle, keep the safe layout.
             let wide = if wraps { tab_px } else { 0.0 };
-            let mut layout = build(&mut self.lcx, &mut fonts.fcx, &vec![wide; tabs.len()]);
+            // Dynamic Text's word gap is a percent of each space's own width (-100 % removes it,
+            // +100 % doubles it): shape once without it to read every space's advance.
+            let word_spacing: Vec<(Range<usize>, f32)> = match gaps {
+                Some((word_gap, _)) if word_gap != 0.0 => {
+                    let mut plain = build(&mut self.lcx, &mut fonts.fcx, &vec![wide; tabs.len()], &[]);
+                    plain.break_all_lines(None);
+                    space_advances(&plain, &ptext, &tabs).into_iter().map(|(r, adv)| (r, word_gap / 100.0 * adv)).collect()
+                }
+                _ => Vec::new(),
+            };
+            let mut layout = build(&mut self.lcx, &mut fonts.fcx, &vec![wide; tabs.len()], &word_spacing);
             let (mut area_slots, mut area_full) = break_lines(&mut layout);
             if wraps && !tabs.is_empty() {
                 let first = tab_widths(&layout, &tabs, &out.styles, indent_start, first_indent, tab_px);
                 let mut want: Vec<f32> = first.iter().map(|t| t.width).collect();
                 for _ in 0..4 {
                     let spacing: Vec<f32> = first.iter().zip(&want).map(|(t, w)| w / t.scale - (t.advance - tab_px)).collect();
-                    let mut next = build(&mut self.lcx, &mut fonts.fcx, &spacing);
+                    let mut next = build(&mut self.lcx, &mut fonts.fcx, &spacing, &word_spacing);
                     let (next_slots, next_full) = break_lines(&mut next);
                     let got: Vec<f32> = tab_widths(&next, &tabs, &out.styles, indent_start, first_indent, tab_px).iter().map(|t| t.width).collect();
                     if got.iter().zip(&want).all(|(a, b)| (a - b).abs() < 0.01) {
@@ -1231,6 +1243,31 @@ fn scaled_style(st: &CharStyle, scale: f32) -> CharStyle {
         s.baseline_shift_pt = st.baseline_shift_pt * r;
     }
     s
+}
+
+/// The spaces parley applies word spacing to (U+0020 and no-break space, tabs excluded) in a
+/// broken layout of `ptext`: each one's range and its shaped advance (px, its glyphs' own
+/// advances, without letter spacing).
+fn space_advances(layout: &Layout<RunBrush>, ptext: &str, tabs: &[usize]) -> Vec<(Range<usize>, f32)> {
+    let mut out: Vec<(Range<usize>, f32)> = Vec::new();
+    for line in layout.lines() {
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(gr) = item else {
+                continue;
+            };
+            for c in gr.run().visual_clusters() {
+                let r = c.text_range();
+                if !matches!(ptext.get(r.clone()), Some(" " | "\u{a0}")) || tabs.binary_search(&r.start).is_ok() {
+                    continue;
+                }
+                out.push((r, c.glyphs().map(|g| g.advance).sum()));
+            }
+        }
+    }
+    // A run split over several items lists its clusters more than once.
+    out.sort_by_key(|(r, _)| r.start);
+    out.dedup_by_key(|(r, _)| r.start);
+    out
 }
 
 /// The first tab stop after `pos` (px from the anchor or box edge); stops are `interval` apart.

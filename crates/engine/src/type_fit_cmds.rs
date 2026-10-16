@@ -160,7 +160,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Dynamic Text Options",
             menu: &[],
             shortcut: None,
-            params: r##"{"layer":id? (default active Type layer),"wordGap":-100..200? (percent of the type size, added to each space),"lineGap":-50..200? (percent of the type size, added to each line advance)} → refits"##,
+            params: r##"{"layer":id? (default active Type layer),"wordGap":-100..200? (percent of each space's own width, added to it: -100 removes the spaces),"lineGap":-50..200? (percent of the type size, added to each line advance)} → refits"##,
             enabled: has_fit,
             journal: true,
             run: set_gaps,

@@ -842,7 +842,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "layout adds the word gap as a percent of the type size, so -100 % overlaps words instead of removing the spaces; needs a decision (task 3 report)"]
     fn word_gap_minus_100_removes_spaces() {
         let mut e = TextEngine::new();
         let natural = |e: &mut TextEngine, text: &str| {
