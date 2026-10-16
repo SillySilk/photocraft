@@ -166,6 +166,8 @@ pub fn refit(engine: &mut crate::TextEngine, layer: &mut TextLayer, dpi: f32) ->
 const REFINE_PASSES: usize = 4;
 /// Widths the search scans before it bisects (part of MAX_PROBES).
 const SCAN_PROBES: usize = 10;
+/// How far (px) the last line's descent may hang below the box and the block still fit.
+const FIT_EPS: f32 = 0.5;
 /// A line is done once its measured width is this close to its target (px).
 const WIDTH_EPS: f32 = 0.05;
 
@@ -320,7 +322,7 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
     let mut target: Vec<f32> = lines.iter().map(|c| line_target(&segs, c)).collect();
     if too_short {
         let f = shrink_factor(&segs, &lines, &scales, line_gap, k, box_h);
-        shrink(&segs, &lines, &mut scales, &mut target, f);
+        let _ = shrink(&segs, &lines, &mut scales, &mut target, f);
     }
 
     // 5. Exact widths: lay the chosen lines out and correct each scale by the visible width
@@ -334,8 +336,9 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
         }
         let out = engine.layout(&base, dpi);
         layouts += 1;
-        fits = !out.hidden;
         let bottom = out.lines.last().map_or(0.0, |l| l.baseline + l.descent) - box_y;
+        // Fits: nothing hidden and the last line's descent inside the box too.
+        fits = !out.hidden && bottom <= box_h + FIT_EPS;
         let tall = out.hidden || bottom > box_h;
         let mut next = scales.clone();
         let mut changed = false;
@@ -357,8 +360,7 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
             // The estimate fell short of the real height: shrink the block to fit (by more when
             // lines are hidden, as the bottom shown doesn't count them).
             let f = (box_h / bottom).min(1.0) * if out.hidden { 0.9 } else { 0.999 };
-            shrink(&segs, &lines, &mut next, &mut target, f);
-            changed = true;
+            changed |= shrink(&segs, &lines, &mut next, &mut target, f);
         }
         if !changed || pass + 1 == REFINE_PASSES {
             break;
@@ -581,14 +583,19 @@ fn stack_parts(segs: &[Segment], lines: &[Cand], scales: &[f32], line_gap: f32, 
     (fixed, scaled)
 }
 
-/// Multiplies the scale and target of every non-empty line by `f`.
-fn shrink(segs: &[Segment], lines: &[Cand], scales: &mut [f32], target: &mut [f32], f: f32) {
+/// Multiplies the scale and target of every non-empty line by `f`. Whether any scale changed
+/// (empty lines and clamped ones can't shrink).
+fn shrink(segs: &[Segment], lines: &[Cand], scales: &mut [f32], target: &mut [f32], f: f32) -> bool {
+    let mut changed = false;
     for ((s, t), c) in scales.iter_mut().zip(target.iter_mut()).zip(lines) {
         if c.first < c.end {
-            *s = clamp_scale(segs, c, *s * f);
+            let next = clamp_scale(segs, c, *s * f);
+            changed |= next != *s;
+            *s = next;
             *t *= f;
         }
     }
+    changed
 }
 
 /// The common factor that makes the stacked block `box_h` tall (spec step 5).
@@ -1080,5 +1087,30 @@ THREE",
         let s = scales(&t);
         assert!(!s.is_empty() && s.iter().all(|v| v.is_finite() && *v > 0.0), "{s:?}");
         assert!(!l.hidden && bottom(&l) <= 200.5, "bottom {}", bottom(&l));
+    }
+
+    #[test]
+    fn fits_means_the_whole_block_is_inside_the_box() {
+        let mut e = TextEngine::new();
+        // Two empty paragraphs (scale 1, nothing to shrink): the second baseline is inside the
+        // box but its descent hangs below, so nothing is hidden and the block still doesn't fit.
+        let mut big = fit_box(
+            "
+", 12.0, 400.0, 400.0,
+        );
+        refit(&mut e, &mut big, 72.0);
+        let full = bottom(&e.layout(&big, 72.0));
+        let mut t = fit_box(
+            "
+",
+            12.0,
+            400.0,
+            full - 1.5,
+        );
+        let r = refit(&mut e, &mut t, 72.0);
+        let l = e.layout(&t, 72.0);
+        assert!(!l.hidden && bottom(&l) > full - 1.0, "{} vs box {}", bottom(&l), full - 1.5);
+        assert!(!r.fits, "{r:?}");
+        assert!(refit(&mut e, &mut big, 72.0).fits);
     }
 }
