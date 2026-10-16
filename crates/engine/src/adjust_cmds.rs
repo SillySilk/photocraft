@@ -352,8 +352,11 @@ fn replace_color_samples(s: &Session, p: &Value) -> Result<crate::selection_cmds
 fn replace_color_apply(s: &mut Session, p: &Value, samples: &crate::selection_cmds::ColorRangeSamples, k: u32) -> Result<Value> {
     let (h, sat, l) = (num(p, "hue", 0.0).clamp(-180.0, 180.0), num(p, "saturation", 0.0).clamp(-100.0, 100.0), num(p, "lightness", 0.0).clamp(-100.0, 100.0));
     let area = s.active().ok_or(EngineError::NoDocument)?.doc.bounds();
+    // `coverage` takes its origin in original document pixels; on a copy reduced by `k`, the
+    // edited rectangle's offset is `k` times larger there.
+    let k = k.max(1) as f32;
     rgba_edit(s, "Replace Color", p, |px, r| {
-        let mask = samples.coverage(px, r.width() as usize, k as f32, [(r.x0 - area.x0) as f32, (r.y0 - area.y0) as f32]);
+        let mask = samples.coverage(px, r.width() as usize, k, [(r.x0 - area.x0) as f32 * k, (r.y0 - area.y0) as f32 * k]);
         tone::replace_color_masked(px, &mask, h, sat, l);
     })
 }

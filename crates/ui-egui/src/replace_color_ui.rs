@@ -501,6 +501,32 @@ mod tests {
         assert!(!changed(&shown, 0, &reduced, 0), "preview must leave the red background alone");
     }
 
+    /// Localized Color Clusters on a reduced preview of a layer whose content starts away from the
+    /// origin: the clusters are centred where the sample was picked, as OK centres them.
+    #[test]
+    fn reduced_localized_preview_matches_ok_on_an_offset_layer() {
+        use photocraft_doc::Layer;
+        let mut doc = Document::with_background("offset", Size::new(400, 40), ColorMode::Rgb, SampleType::U8, Color::WHITE);
+        let mut layer = Layer::raster("red", doc.pixel_format());
+        let surface = layer.surface_mut().unwrap();
+        surface.fill_rect(GRect::new(200, 0, 300, 40), &[1.0, 0.0, 0.0, 1.0]);
+        surface.fill_rect(GRect::new(360, 0, 400, 40), &[1.0, 0.0, 0.0, 1.0]);
+        let id = layer.id;
+        doc.layers.push(layer);
+        let p = json!({"color": "#ff0000", "points": [[210, 20]], "localized": true, "range": 25, "fuzziness": 20, "hue": 120});
+        let shown = crate::filter_dialog::preview_document(&doc, Some(id), COMMAND, &p, 2).unwrap();
+        let mut s = photocraft_engine::Session::new();
+        s.add_document(doc, None);
+        s.select_layer(id).unwrap();
+        s.execute(COMMAND, p).unwrap();
+        let ok = crate::proxy::proxy_document(&s.active().unwrap().doc, 2);
+        let row = |d: &Document| d.layer(id).unwrap().surface().unwrap().read_region(GRect::new(100, 10, 200, 11));
+        let (ok, shown) = (row(&ok), row(&shown));
+        let worst = ok.iter().zip(&shown).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(worst < 0.03, "preview differs from OK by {worst} across the matched cluster");
+        assert!(ok[4 * 10 + 1] > 0.8, "OK recolours red near the sample to green");
+    }
+
     #[test]
     fn result_swatch_tracks_sliders() {
         let mut app = app_with_doc();
