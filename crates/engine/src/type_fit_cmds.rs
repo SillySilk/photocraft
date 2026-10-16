@@ -117,6 +117,9 @@ fn gap(p: &Value, key: &str) -> Result<Option<f32>> {
 fn set_gaps(s: &mut Session, p: &Value) -> Result<Value> {
     single_layer(s, SET, p)?;
     let (word, line) = (gap(p, "wordGap")?, gap(p, "lineGap")?);
+    if word.is_none() && line.is_none() {
+        return Err(bad(SET, "give wordGap or lineGap"));
+    }
     let fit = with_text(s, p, "Dynamic Text Options", |t, _| {
         let fit = t.fit.as_mut().ok_or_else(|| bad(SET, NOT_FITTED))?;
         if let Some(w) = word {

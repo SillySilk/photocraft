@@ -957,6 +957,9 @@ pub fn specs() -> Vec<CommandSpec> {
                 check_kerning(p).map_err(|m| bad("type.setStyle", m))?;
                 check_steps(p).map_err(|m| bad("type.setStyle", m))?;
                 let ids = with_text_targets(s, p, "Set Type Style", |t, (a, b)| {
+                    if t.fit.is_some() && p.get("direction").and_then(Value::as_str) == Some("rtl") {
+                        return Err(bad("type.setStyle", "Release Dynamic Text first"));
+                    }
                     let props = shown_style_params(t, p)?;
                     check_size_tracking(&props).map_err(|m| bad("type.setStyle", m))?;
                     let mut probe = CharStyle::default();

@@ -210,10 +210,17 @@ fn refused_targets() {
 }
 
 #[test]
-fn turning_a_fitted_layer_vertical_stops_refitting() {
+fn a_fitted_layer_loaded_as_vertical_is_not_refitted() {
+    // The commands refuse to make a fitted layer vertical; a file can still hold one.
     let (mut s, id) = session_with_box_text("Hello there", 12.0, [0.0, 0.0, 300.0, 100.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
-    s.execute("type.orientation.vertical", json!({"layer": id.0})).unwrap();
+    s.edit("vertical", |doc, _| {
+        if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
+            t.orientation = photocraft_doc::text::Orientation::Vertical;
+        }
+        Ok(())
+    })
+    .unwrap();
     let size = text(&s, id).size_pt;
     s.execute("type.edit", json!({"layer": id.0, "text": "Hello there ".repeat(50)})).unwrap();
     assert!((text(&s, id).size_pt - size).abs() < 1e-4, "the solver never sees vertical text");
@@ -251,4 +258,52 @@ fn psd_export_warns_for_dynamic_text() {
     assert!(t.fit.is_none());
     assert!(matches!(t.shape, TextShape::Box { .. }));
     assert!((t.size_pt - size).abs() < 0.05, "{} vs {size}", t.size_pt);
+}
+
+#[test]
+fn fitted_layer_refuses_changes_that_would_stop_the_fit() {
+    let (mut s, id) = session_with_box_text("Hello dynamic world", 12.0, [0.0, 0.0, 300.0, 100.0]);
+    s.edit("path", |doc, _| {
+        doc.work_path = Some(Path::new(vec![Subpath::polyline(&[(10.0, 200.0), (390.0, 200.0)])]));
+        Ok(())
+    })
+    .unwrap();
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    let before = history_len(&s);
+    for (cmd, params) in [
+        ("type.orientation.vertical", json!({"layer": id.0})),
+        ("type.setStyle", json!({"layer": id.0, "direction": "rtl"})),
+        ("type.attachToPath", json!({"layer": id.0})),
+    ] {
+        match s.execute(cmd, params) {
+            Err(EngineError::BadParams { cmd: c, msg }) => {
+                assert_eq!(c, cmd);
+                assert!(msg.contains("Release Dynamic Text first"), "{cmd}: {msg}");
+            }
+            other => panic!("{cmd}: {other:?}"),
+        }
+    }
+    assert_eq!(history_len(&s), before, "no history step");
+    let t = text(&s, id);
+    assert!(t.fit.is_some() && t.orientation == photocraft_doc::text::Orientation::Horizontal);
+    // After releasing, the same commands work.
+    s.execute("type.releaseDynamicText", json!({"layer": id.0})).unwrap();
+    s.execute("type.orientation.vertical", json!({"layer": id.0})).unwrap();
+}
+
+#[test]
+fn set_dynamic_text_without_gaps_is_refused() {
+    let (mut s, id) = session_with_box_text("Hello", 12.0, [0.0, 0.0, 300.0, 100.0]);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    let before = history_len(&s);
+    for p in [json!({"layer": id.0}), json!({"layer": id.0, "wordGap": null})] {
+        match s.execute("type.setDynamicText", p) {
+            Err(EngineError::BadParams { cmd, msg }) => {
+                assert_eq!(cmd, "type.setDynamicText");
+                assert!(msg.contains("give wordGap or lineGap"), "{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(history_len(&s), before);
 }

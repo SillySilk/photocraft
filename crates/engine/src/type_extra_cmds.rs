@@ -135,7 +135,11 @@ fn set_aa(s: &mut Session, p: &Value, aa: AntiAlias) -> Result<Value> {
 }
 
 fn set_orientation(s: &mut Session, p: &Value, o: Orientation) -> Result<Value> {
+    let cmd = if o == Orientation::Vertical { "type.orientation.vertical" } else { "type.orientation.horizontal" };
     with_text_targets(s, p, "Change Text Orientation", |t, _| {
+        if o == Orientation::Vertical && t.fit.is_some() {
+            return Err(EngineError::BadParams { cmd: cmd.into(), msg: "Release Dynamic Text first".into() });
+        }
         t.orientation = o;
         Ok(())
     })?;
@@ -381,6 +385,9 @@ fn attach_to_path(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let sub = path_source(doc, p)?;
     with_text(s, p, "Type on a Path", |t, _| {
+        if t.fit.is_some() {
+            return Err(bad("Release Dynamic Text first"));
+        }
         // The path lives in document space; the type layer keeps it in its own text space, so
         // the type lands on the path where it is drawn.
         let inv = t.transform.inverse().ok_or_else(|| EngineError::Other("the type layer's transform cannot be inverted".into()))?;
