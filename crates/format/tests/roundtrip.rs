@@ -719,7 +719,8 @@ fn with_fit_lines(doc: &mut Document, lines: &[photocraft_doc::text::FitLine]) {
     }
 }
 
-/// Hostile solved lines in a file (out of order, or not on a char boundary) load empty.
+/// Hostile solved lines in a file (out of order, not on a char boundary, or a zero or negative
+/// scale) load empty.
 #[test]
 fn bad_lines_load_empty() {
     use photocraft_doc::text::FitLine;
@@ -738,7 +739,9 @@ fn bad_lines_load_empty() {
     // Valid lines in the same file load as saved, so the cases below test the lines alone.
     let good = load(serde_json::json!([l(0), l(7)]));
     assert!(good.iter().all(|lines| *lines == [FitLine { start: 0, scale: 1.0 }, FitLine { start: 7, scale: 1.0 }]), "{good:?}");
-    for bad in [serde_json::json!([l(0), l(7), l(3)]), serde_json::json!([l(0), l(2)])] {
+    let zero = serde_json::json!([l(0), { "start": 7, "scale": 0 }]);
+    let negative = serde_json::json!([{ "start": 0, "scale": -1 }, l(7)]);
+    for bad in [serde_json::json!([l(0), l(7), l(3)]), serde_json::json!([l(0), l(2)]), zero, negative] {
         let got = load(bad.clone());
         assert!(got.iter().all(Vec::is_empty), "{bad} loaded as {got:?}");
     }
