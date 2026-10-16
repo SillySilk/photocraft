@@ -5,7 +5,7 @@ use photocraft_geom::Affine;
 
 use crate::{TextEngine, fonts};
 
-fn point(text: &str, size_pt: f32) -> TextLayer {
+pub(crate) fn point(text: &str, size_pt: f32) -> TextLayer {
     TextLayer { text: text.into(), font_family: "Inter".into(), size_pt, ..Default::default() }
 }
 
@@ -2015,7 +2015,7 @@ fn area_poly(pts: &[(f64, f64)]) -> photocraft_doc::vector::Path {
 }
 
 /// An ellipse from four kappa curves inside `[x, y, w, h]`.
-fn area_ellipse(x: f64, y: f64, w: f64, h: f64) -> photocraft_doc::vector::Path {
+pub(crate) fn area_ellipse(x: f64, y: f64, w: f64, h: f64) -> photocraft_doc::vector::Path {
     use photocraft_doc::vector::{Knot, Subpath};
     use photocraft_geom::Point;
     let (rx, ry, cx, cy) = (w / 2.0, h / 2.0, x + w / 2.0, y + h / 2.0);
@@ -2243,13 +2243,13 @@ fn area_justify_fills_each_span_but_the_last_line() {
 
 // Dynamic Text: overflow reporting and fit gaps.
 
-fn box_layer(text: &str, size_pt: f32, (x, y, width, height): (f32, f32, f32, f32)) -> TextLayer {
+pub(crate) fn box_layer(text: &str, size_pt: f32, (x, y, width, height): (f32, f32, f32, f32)) -> TextLayer {
     let mut t = point(text, size_pt);
     t.shape = TextShape::Box { x, y, width, height };
     t
 }
 
-fn area_ellipse_layer(text: &str, size_pt: f32, w: f64, h: f64) -> TextLayer {
+pub(crate) fn area_ellipse_layer(text: &str, size_pt: f32, w: f64, h: f64) -> TextLayer {
     let mut t = point(text, size_pt);
     t.shape = TextShape::Area { path: area_ellipse(0.0, 0.0, w, h) };
     t
