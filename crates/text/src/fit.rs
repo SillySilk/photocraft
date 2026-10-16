@@ -173,8 +173,12 @@ pub fn is_fitted_box(layer: &TextLayer) -> bool {
 
 /// Whether every glyph of `b` is within 0.5 px of the same glyph of `a`, in order. A fitted
 /// layout shapes each solved line alone and has an invisible direction mark per line (and the
-/// spaces a break replaced) that the baked layout lacks: those are skipped.
+/// spaces a break replaced) that the baked layout lacks: those are skipped, at most two per line
+/// of `a`, so a baked text that lost a word does not pass.
 fn same_glyphs(a: &crate::TextLayout, b: &crate::TextLayout) -> bool {
+    if a.glyphs.len().saturating_sub(b.glyphs.len()) > 2 * a.lines.len().max(1) {
+        return false;
+    }
     let mut from = 0;
     for q in &b.glyphs {
         let found = a.glyphs.get(from..).and_then(|rest| rest.iter().position(|p| p.id == q.id && (p.x - q.x).abs() <= 0.5 && (p.y - q.y).abs() <= 0.5));
@@ -1551,6 +1555,19 @@ THREE",
         let (t, _) = solved(&mut e, make(0.8));
         let m = bake(&mut e, &t, 72.0).unwrap_err().to_string();
         assert!(m.contains("condensed type (Horizontal Scale below 100%)"), "{m}");
+    }
+
+    #[test]
+    fn same_glyphs_allows_only_a_few_unmatched_glyphs_per_line() {
+        let mut e = TextEngine::new();
+        let full = e.layout(&box_layer("Hello world and more words", 12.0, (0.0, 0.0, 400.0, 100.0)), 72.0);
+        assert_eq!(full.lines.len(), 1);
+        // Dropping a whole word leaves many fitted glyphs unmatched: not the same look.
+        let short = e.layout(&box_layer("Hello world", 12.0, (0.0, 0.0, 400.0, 100.0)), 72.0);
+        assert!(!same_glyphs(&full, &short));
+        // Dropping one trailing space (as a baked break does) still is.
+        let spaced = e.layout(&box_layer("Hello world ", 12.0, (0.0, 0.0, 400.0, 100.0)), 72.0);
+        assert!(same_glyphs(&spaced, &short));
     }
 
     #[test]
