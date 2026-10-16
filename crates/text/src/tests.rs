@@ -2625,3 +2625,27 @@ fn fit_lines_keep_the_paragraphs_auto_direction() {
     assert!(at(13).rtl);
     assert!(at(9).x > at(13).x, "RTL base: 'abc' right of the Hebrew: {:?} vs {:?}", at(9), at(13));
 }
+
+#[test]
+fn clamped_wide_fit_line_overflows_without_hiding() {
+    let mut t = box_layer("aa bb cc", 20.0, (0.0, 0.0, 60.0, 400.0));
+    t.fit = fit_lines(&[(0, 1.0), (3, 3.0)]);
+    let l = layout_of(&t);
+    assert!(l.overflowed && !l.hidden, "{:?}", l.lines);
+}
+
+#[test]
+fn hidden_reports_text_past_the_box_or_shape() {
+    let mut t = box_layer("aa bb cc", 20.0, (0.0, 0.0, 4000.0, 40.0));
+    t.fit = fit_lines(&[(0, 1.0), (3, 1.0), (6, 1.0)]);
+    let l = layout_of(&t);
+    assert!(l.hidden && l.overflowed);
+    let l = layout_of(&box_layer("one two three four five six seven eight nine ten", 24.0, (0.0, 0.0, 120.0, 40.0)));
+    assert!(l.hidden && l.overflowed);
+    let l = layout_of(&box_layer("Supercalifragilistic", 48.0, (0.0, 0.0, 60.0, 400.0)));
+    assert!(l.overflowed && !l.hidden, "too wide, nothing hidden");
+    let l = layout_of(&area_ellipse_layer(&"word ".repeat(200), 18.0, 200.0, 120.0));
+    assert!(l.hidden && l.overflowed);
+    let l = layout_of(&box_layer("alpha beta gamma delta\n", 20.0, (0.0, 0.0, 150.0, 40.0)));
+    assert!(!l.hidden && !l.overflowed, "an empty last paragraph is not hidden text");
+}

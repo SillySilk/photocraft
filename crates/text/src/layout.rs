@@ -217,15 +217,18 @@ pub struct TextLayout {
     pub px_per_pt: f32,
     /// Vertical type: line space is turned 90° clockwise into text space.
     pub vertical: bool,
-    /// Box or area text that doesn't fit. True when text other than line and paragraph breaks
-    /// is hidden past the box or shape (an empty last paragraph below the box doesn't count), or
-    /// when a word is too long to wrap: a line's shaped advance, without trailing whitespace,
+    /// Box or area text that doesn't fit: [`Self::hidden`], or a line too wide for its width: a line's shaped advance, without trailing whitespace,
     /// is more than 0.5 px wider than the width it was broken at (box or span less indents,
     /// and on a paragraph's first line less the first-line indent). Horizontal scale and manual
     /// or optical kerning are applied after line breaking and never count: lines they push past
-    /// the edge are drawn as before but not flagged. Always false for point and path text.
-    /// Dynamic Text's fit solver uses it as its "too big" test.
+    /// the edge are drawn as before but not flagged. A solved Dynamic Text box line that clamping
+    /// left wider than the box counts as too wide. Always false for point and path text.
+    /// Dynamic Text's uniform fit uses it as its "too big" test.
     pub overflowed: bool,
+    /// Text other than line and paragraph breaks is hidden: the box height or area shape ran out
+    /// (an empty last paragraph below the box doesn't count). Implies `overflowed`. Always false
+    /// for point and path text. The Dynamic Text box solver uses it as its height test.
+    pub hidden: bool,
 }
 
 impl TextLayout {
@@ -788,7 +791,9 @@ impl Layouter {
                 // Area type: the slot the breaker gave this line.
                 let slot = area_slots.get(li).copied();
                 if area.is_some() && slot.is_none() {
-                    out.overflowed |= hides_text(map(line.text_range().start));
+                    let h = hides_text(map(line.text_range().start));
+                    out.hidden |= h;
+                    out.overflowed |= h;
                     stop = true;
                     break;
                 }
@@ -812,7 +817,9 @@ impl Layouter {
                 // that line.
                 let overflow = if vertical { baseline + descent > -box_rect.0 + 0.5 } else { baseline > box_rect.1 + box_rect.3 + 0.5 };
                 if is_box && overflow {
-                    out.overflowed |= hides_text(map(line.text_range().start));
+                    let h = hides_text(map(line.text_range().start));
+                    out.hidden |= h;
+                    out.overflowed |= h;
                     stop = true;
                     break;
                 }
@@ -1125,7 +1132,9 @@ impl Layouter {
             }
             if area_full {
                 // The shape is full: the rest of this paragraph and later ones are hidden.
-                out.overflowed |= hides_text(shown_end);
+                let h = hides_text(shown_end);
+                out.hidden |= h;
+                out.overflowed |= h;
                 stop = true;
             }
             if unit.last {
