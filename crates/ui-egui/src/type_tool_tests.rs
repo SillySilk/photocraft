@@ -2295,6 +2295,25 @@ mod dynamic_text_ui {
         assert!(!h.get_by_label("Font size").accesskit_node().is_disabled());
     }
 
+    #[test]
+    fn word_gap_slider_goes_down_to_minus_100() {
+        let (app, id) = app_with_box_text("Hello there", 12.0);
+        let mut h = bar(app, true);
+        h.state_mut().run("type.convertToDynamicText", json!({})).unwrap();
+        h.state_mut().run("type.setDynamicText", json!({"wordGap": 37})).unwrap();
+        h.run_steps(3);
+        let field = h.get_all_by_role(Role::SpinButton).find(|n| n.accesskit_node().numeric_value() == Some(37.0)).expect("Word Gap field");
+        field.click();
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.run_steps(1);
+        h.event(egui::Event::Text("-100".into()));
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(text(h.state(), id).fit.as_ref().map(|f| f.word_gap), Some(-100.0));
+    }
+
     fn toggle_disabled(h: &Harness<'static, PhotocraftApp>) -> bool {
         h.get_by_label("Dynamic Text").accesskit_node().is_disabled()
     }
