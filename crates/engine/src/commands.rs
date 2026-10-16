@@ -1357,6 +1357,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::exr_cmds::specs());
     v.extend(crate::type_extra_cmds::specs());
     v.extend(crate::type_area_cmds::specs());
+    v.extend(crate::type_fit_cmds::specs());
     v.extend(crate::type_styles_cmds::specs());
     v.extend(crate::type_spell_cmds::specs());
     v.extend(crate::type_caret_cmds::specs());

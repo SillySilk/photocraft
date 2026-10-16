@@ -1,0 +1,170 @@
+//! Dynamic Text: type that sizes itself to fill its box or area shape, like Photoshop's
+//! Convert to Dynamic Text. The fit itself runs in `type_cmds::refresh`, so every edit of a
+//! fitted layer refits it in the same history step.
+
+use photocraft_doc::text::{Orientation, TextDirection, TextFit, TextShape};
+use photocraft_doc::{LayerContent, TextLayer};
+use serde_json::{Value, json};
+
+use crate::commands::CommandSpec;
+use crate::type_extra_cmds::{point_to_box, with_text};
+use crate::{EngineError, Result, Session};
+
+const CONVERT: &str = "type.convertToDynamicText";
+const RELEASE: &str = "type.releaseDynamicText";
+const SET: &str = "type.setDynamicText";
+const NOT_FITTED: &str = "the type layer is not Dynamic Text";
+
+fn bad(cmd: &str, m: &str) -> EngineError {
+    EngineError::BadParams { cmd: cmd.into(), msg: m.into() }
+}
+
+/// Why `t` cannot be fitted, or `None`. The solver does not check these itself: vertical type,
+/// right-to-left paragraphs and path text are refused here, and `refresh` skips them.
+pub(crate) fn fit_refusal(t: &TextLayer) -> Option<&'static str> {
+    if t.orientation == Orientation::Vertical {
+        return Some("Dynamic Text does not support vertical type");
+    }
+    if t.paragraph_runs().iter().any(|p| p.style.direction == TextDirection::Rtl) {
+        return Some("Dynamic Text does not support right-to-left text");
+    }
+    if matches!(t.shape, TextShape::Path { .. }) {
+        return Some("Dynamic Text does not support type on a path");
+    }
+    None
+}
+
+fn active_text(s: &Session) -> std::result::Result<&TextLayer, String> {
+    let d = s.active().ok_or("no document open")?;
+    if d.selected_layers().len() > 1 {
+        return Err("select one type layer".into());
+    }
+    match d.active_layer.and_then(|id| d.doc.layer(id)).map(|l| &l.content) {
+        Some(LayerContent::Text(t)) => Ok(t),
+        _ => Err("the active layer is not a type layer".into()),
+    }
+}
+
+fn can_convert(s: &Session) -> std::result::Result<(), String> {
+    let t = active_text(s)?;
+    if t.fit.is_some() {
+        return Err("the type layer is already Dynamic Text".into());
+    }
+    fit_refusal(t).map_or(Ok(()), |m| Err(m.into()))
+}
+
+fn has_fit(s: &Session) -> std::result::Result<(), String> {
+    if active_text(s)?.fit.is_some() { Ok(()) } else { Err(NOT_FITTED.into()) }
+}
+
+/// Dynamic Text works on one layer: an explicit `"layers"` list, or several selected layers
+/// with no `"layer"`, is refused.
+fn single_layer(s: &Session, cmd: &str, p: &Value) -> Result<()> {
+    let several = "Dynamic Text works on one type layer at a time";
+    if p.get("layers").is_some() {
+        return Err(bad(cmd, several));
+    }
+    let st = s.active().ok_or(EngineError::NoDocument)?;
+    if p.get("layer").is_none() && st.selected_layers().len() > 1 {
+        return Err(bad(cmd, several));
+    }
+    Ok(())
+}
+
+fn convert(s: &mut Session, p: &Value) -> Result<Value> {
+    single_layer(s, CONVERT, p)?;
+    let boxed = with_text(s, p, "Convert to Dynamic Text", |t, doc| {
+        if t.fit.is_some() {
+            return Err(bad(CONVERT, "the type layer is already Dynamic Text"));
+        }
+        if let Some(m) = fit_refusal(t) {
+            return Err(bad(CONVERT, m));
+        }
+        let boxed = matches!(t.shape, TextShape::Point).then(|| point_to_box(t, doc));
+        // `with_text` re-renders through `refresh`, which runs the fit in this same step.
+        t.fit = Some(TextFit::default());
+        Ok(boxed)
+    })?;
+    let mut out = json!({"fit": true});
+    if let Some(b) = boxed {
+        out["box"] = b;
+    }
+    Ok(out)
+}
+
+fn release(s: &mut Session, p: &Value) -> Result<Value> {
+    single_layer(s, RELEASE, p)?;
+    with_text(s, p, "Release Dynamic Text", |t, _| {
+        // The fitted sizes stay: only the fit is turned off.
+        t.fit.take().map(|_| ()).ok_or_else(|| bad(RELEASE, NOT_FITTED))
+    })?;
+    Ok(json!({"fit": false}))
+}
+
+/// A gap param: absent (or null) keeps the current gap; otherwise a number in
+/// `GAP_MIN..=GAP_MAX` percent.
+fn gap(p: &Value, key: &str) -> Result<Option<f32>> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let range = f64::from(TextFit::GAP_MIN)..=f64::from(TextFit::GAP_MAX);
+            let n = v.as_f64().filter(|n| range.contains(n));
+            n.map(|n| Some(n as f32)).ok_or_else(|| bad(SET, &format!("\"{key}\" must be a number from {} to {} percent", TextFit::GAP_MIN, TextFit::GAP_MAX)))
+        }
+    }
+}
+
+fn set_gaps(s: &mut Session, p: &Value) -> Result<Value> {
+    single_layer(s, SET, p)?;
+    let (word, line) = (gap(p, "wordGap")?, gap(p, "lineGap")?);
+    let fit = with_text(s, p, "Dynamic Text Options", |t, _| {
+        let fit = t.fit.as_mut().ok_or_else(|| bad(SET, NOT_FITTED))?;
+        if let Some(w) = word {
+            fit.word_gap = w;
+        }
+        if let Some(l) = line {
+            fit.line_gap = l;
+        }
+        Ok(*fit)
+    })?;
+    Ok(json!({"wordGap": fit.word_gap, "lineGap": fit.line_gap}))
+}
+
+pub fn specs() -> Vec<CommandSpec> {
+    vec![
+        CommandSpec {
+            id: CONVERT,
+            label: "Convert to Dynamic Text",
+            menu: &["Type"],
+            shortcut: None,
+            params: r##"{"layer":id? (default active Type layer)} → the text sizes itself to fill its box or area shape on every edit (point text becomes box text first); not for vertical, right-to-left or path text"##,
+            enabled: can_convert,
+            journal: true,
+            run: convert,
+        },
+        CommandSpec {
+            id: RELEASE,
+            label: "Release Dynamic Text",
+            menu: &["Type"],
+            shortcut: None,
+            params: r##"{"layer":id? (default active Type layer)} → fit off; the fitted sizes are kept"##,
+            enabled: has_fit,
+            journal: true,
+            run: release,
+        },
+        CommandSpec {
+            id: SET,
+            label: "Dynamic Text Options",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"layer":id? (default active Type layer),"wordGap":-50..200? (percent of the type size, added to each space),"lineGap":-50..200? (percent of the type size, added to each line advance)} → refits"##,
+            enabled: has_fit,
+            journal: true,
+            run: set_gaps,
+        },
+    ]
+}
+
+#[cfg(test)]
+#[path = "type_fit_cmds/tests.rs"]
+mod tests;
