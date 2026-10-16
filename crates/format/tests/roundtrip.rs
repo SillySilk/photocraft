@@ -3,7 +3,7 @@
 mod common;
 use common::*;
 use photocraft_color::{ColorMode, SampleType};
-use photocraft_doc::text::{CharStyle, ParagraphStyle, TextRun};
+use photocraft_doc::text::{CharStyle, FitLine, ParagraphStyle, TextFit, TextRun, TextShape};
 use photocraft_doc::text_styles::{CharacterStyleDef, ParagraphStyleDef};
 use photocraft_doc::{Document, Layer, LayerContent, LayerId, Slice, TextLayer, VarKind, VariableDef};
 use photocraft_format::*;
@@ -544,7 +544,6 @@ fn text_kerning_roundtrips_and_defaults() {
 /// Type on a path (#218): the path, start offset and flip survive .pcraft.
 #[test]
 fn path_text_shape_roundtrips() {
-    use photocraft_doc::text::TextShape;
     use photocraft_doc::vector::Subpath;
     let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
     let path = Subpath::polyline(&[(0.0, 0.0), (50.0, 20.0), (120.0, 5.5)]);
@@ -565,7 +564,6 @@ fn path_text_shape_roundtrips() {
 /// Area type (#218): the whole path, ops and fill rule included, survives .pcraft.
 #[test]
 fn area_text_shape_roundtrips() {
-    use photocraft_doc::text::TextShape;
     use photocraft_doc::vector::{FillRule, Path, PathOp, Subpath};
     let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
     let mut path = Path::new(vec![
@@ -631,7 +629,6 @@ fn text_fits(doc: &Document) -> Vec<Option<photocraft_doc::text::TextFit>> {
 /// Dynamic Text: the fit gaps survive .pcraft.
 #[test]
 fn fit_round_trips() {
-    use photocraft_doc::text::{TextFit, TextShape};
     let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
     let ids: Vec<LayerId> = doc.walk().into_iter().filter(|(_, _, l)| matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.id).collect();
     assert!(!ids.is_empty());
@@ -650,7 +647,6 @@ fn fit_round_trips() {
 /// The solver's lines survive .pcraft; hostile ones are dropped on load.
 #[test]
 fn lines_round_trip() {
-    use photocraft_doc::text::{FitLine, TextFit, TextShape};
     let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
     let ids: Vec<LayerId> = doc.walk().into_iter().filter(|(_, _, l)| matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.id).collect();
     assert!(!ids.is_empty());
@@ -694,7 +690,6 @@ fn missing_fit_loads_as_none() {
 /// Hostile gap values in a file are clamped on load.
 #[test]
 fn nan_gaps_clamp_on_load() {
-    use photocraft_doc::text::TextFit;
     let doc = rich_doc(ColorMode::Rgb, SampleType::U8);
     let bytes = save_to_bytes(&doc, &SaveOptions::default()).unwrap();
     let hostile = edit_text_manifest(&bytes, |m| {
@@ -706,8 +701,7 @@ fn nan_gaps_clamp_on_load() {
 }
 
 /// Text layers of `doc` set to box text "héllo world" ("é" is bytes 1..3) fitted with `lines`.
-fn with_fit_lines(doc: &mut Document, lines: &[photocraft_doc::text::FitLine]) {
-    use photocraft_doc::text::{TextFit, TextShape};
+fn with_fit_lines(doc: &mut Document, lines: &[FitLine]) {
     let ids: Vec<LayerId> = doc.walk().into_iter().filter(|(_, _, l)| matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.id).collect();
     assert!(!ids.is_empty());
     for id in ids {
@@ -723,7 +717,6 @@ fn with_fit_lines(doc: &mut Document, lines: &[photocraft_doc::text::FitLine]) {
 /// scale) load empty.
 #[test]
 fn bad_lines_load_empty() {
-    use photocraft_doc::text::FitLine;
     let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
     with_fit_lines(&mut doc, &[]);
     let bytes = save_to_bytes(&doc, &SaveOptions::default()).unwrap();
@@ -750,7 +743,6 @@ fn bad_lines_load_empty() {
 /// Bad solved lines in memory save as none, so the file holds nothing load would reject.
 #[test]
 fn bad_lines_save_empty() {
-    use photocraft_doc::text::FitLine;
     let l = |start| FitLine { start, scale: 1.0 };
     for bad in [vec![l(0), l(7), l(3)], vec![l(0), l(2)]] {
         let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
@@ -767,7 +759,6 @@ fn bad_lines_save_empty() {
 /// A non-finite gap in memory must not write a file that won't open (JSON has no NaN).
 #[test]
 fn non_finite_gaps_save_as_a_loadable_file() {
-    use photocraft_doc::text::TextFit;
     let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
     let ids: Vec<LayerId> = doc.walk().into_iter().filter(|(_, _, l)| matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.id).collect();
     assert!(!ids.is_empty());
