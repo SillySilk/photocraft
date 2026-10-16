@@ -2873,6 +2873,7 @@ mod tests {
         }
         pointer_up(&mut app, [190.0, 55.0], [90.0, 55.0]);
         assert_ne!(lines(&app), lines0);
+        assert!(lines(&app).len() >= lines0.len(), "a narrower box never has fewer lines: {lines0:?} -> {:?}", lines(&app));
         assert_eq!(size(&app), size0, "the base size is kept");
         assert_eq!(app.session.active().unwrap().history.entries().len(), before + 1);
     }
