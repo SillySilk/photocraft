@@ -296,15 +296,26 @@ impl TextFit {
     /// boundary of `text`, strictly increasing, first == 0, and every scale finite and > 0;
     /// else cleared.
     pub fn sanitized(self, text: &str) -> Self {
+        let (word_gap, line_gap) = self.gaps();
+        let valid = self.lines_valid(text);
+        Self { word_gap, line_gap, lines: if valid { self.lines } else { Vec::new() } }
+    }
+
+    /// The word and line gaps as [`Self::sanitized`] clamps them, without copying `lines`.
+    pub fn gaps(&self) -> (f32, f32) {
         let clean = |g: f32, min: f32| if g.is_finite() { g.clamp(min, Self::GAP_MAX) } else { 0.0 };
-        let valid = self.lines.first().is_none_or(|l| l.start == 0)
+        (clean(self.word_gap, Self::WORD_GAP_MIN), clean(self.line_gap, Self::LINE_GAP_MIN))
+    }
+
+    /// `lines` if [`Self::sanitized`] would keep them for `text`, else empty; borrows, never copies.
+    pub fn valid_lines(&self, text: &str) -> &[FitLine] {
+        if self.lines_valid(text) { &self.lines } else { &[] }
+    }
+
+    fn lines_valid(&self, text: &str) -> bool {
+        self.lines.first().is_none_or(|l| l.start == 0)
             && self.lines.iter().all(|l| l.scale.is_finite() && l.scale > 0.0 && text.is_char_boundary(l.start as usize))
-            && self.lines.windows(2).all(|w| w[0].start < w[1].start);
-        Self {
-            word_gap: clean(self.word_gap, Self::WORD_GAP_MIN),
-            line_gap: clean(self.line_gap, Self::LINE_GAP_MIN),
-            lines: if valid { self.lines } else { Vec::new() },
-        }
+            && self.lines.windows(2).all(|w| w[0].start < w[1].start)
     }
 }
 
@@ -340,6 +351,16 @@ mod tests {
         // Valid lines are kept.
         let good = vec![l(0, 1.5), l(6, 0.8)];
         assert_eq!(fit(0.0, 0.0, good.clone()).sanitized("hello world").lines, good);
+    }
+
+    #[test]
+    fn gaps_and_valid_lines_borrow_what_sanitized_keeps() {
+        let l = |start, scale| FitLine { start, scale };
+        let f = fit(f32::NAN, -900.0, vec![l(0, 1.0), l(6, 2.0)]);
+        assert_eq!(f.gaps(), (0.0, TextFit::LINE_GAP_MIN));
+        assert_eq!(f.valid_lines("hello world"), &[l(0, 1.0), l(6, 2.0)]);
+        assert!(f.valid_lines("hello").is_empty(), "start 6 is past the end");
+        assert_eq!(fit(250.0, 10.0, vec![]).gaps(), (TextFit::GAP_MAX, 10.0));
     }
 
     #[test]

@@ -469,7 +469,8 @@ impl Layouter {
         let vertical = t.orientation == Orientation::Vertical;
         // Dynamic Text: a word gap widens each space and a line gap replaces the leading, both
         // percent of the font size. None lays out exactly as before.
-        let fit = t.fit.clone().map(|f| f.sanitized(&t.text));
+        let gaps = t.fit.as_ref().map(TextFit::gaps);
+        let line_gap = gaps.map(|(_, line)| line);
         let mut out = TextLayout { px_per_pt: k, vertical, ..Default::default() };
         // Resolve families (PostScript names from PSDs, unknown families).
         for r in &runs {
@@ -610,8 +611,8 @@ impl Layouter {
                 for p in style_props(&out.styles[si0], k, &fallback, si0 as u32, small_caps[si0]) {
                     b.push_default(p);
                 }
-                if let Some(f) = fit.as_ref() {
-                    b.push_default(StyleProperty::WordSpacing(f.word_gap / 100.0 * out.styles[si0].size_pt * k));
+                if let Some((word_gap, _)) = gaps {
+                    b.push_default(StyleProperty::WordSpacing(word_gap / 100.0 * out.styles[si0].size_pt * k));
                 }
                 for (ri, st) in out.styles.iter().enumerate() {
                     let rs = run_starts[ri];
@@ -624,8 +625,8 @@ impl Layouter {
                         b.push(p, range.clone());
                     }
                     // Parley widens each space (U+0020 and no-break space) by the word spacing.
-                    if let Some(f) = fit.as_ref() {
-                        b.push(StyleProperty::WordSpacing(f.word_gap / 100.0 * st.size_pt * k), range.clone());
+                    if let Some((word_gap, _)) = gaps {
+                        b.push(StyleProperty::WordSpacing(word_gap / 100.0 * st.size_pt * k), range.clone());
                     }
                     if vertical {
                         // Upright pieces get the vertical alternates and their class in the brush.
@@ -693,7 +694,7 @@ impl Layouter {
                 // largest leading, measured on the unwrapped paragraph), so no wrapped line comes
                 // out taller than the row it was planned in and no second plan is needed.
                 layout.break_all_lines(None);
-                let m = area_metrics(layout, &out.styles, &ps, k, first_style, vertical, fit.as_ref());
+                let m = area_metrics(layout, &out.styles, &ps, k, first_style, vertical, line_gap);
                 break_area(layout, a, area_from(m), m, (indent_start, indent_end), first_px, &area_budget)
             };
             // Paragraph text: a tab is never wider than a space plus one tab interval, so breaking
@@ -749,7 +750,7 @@ impl Layouter {
                     break;
                 }
                 let m = *line.metrics();
-                let LineMetrics { ascent, descent, leading } = line_metrics(&line, &out.styles, &ps, k, first_style, vertical, fit.as_ref());
+                let LineMetrics { ascent, descent, leading } = line_metrics(&line, &out.styles, &ps, k, first_style, vertical, line_gap);
                 let baseline = match (slot, prev_baseline) {
                     (Some(s), _) => s.baseline,
                     // The first column's right edge touches the box's right edge.
@@ -1278,8 +1279,8 @@ fn break_area_pass(layout: &mut Layout<RunBrush>, rows: &mut AreaRows<'_>, inset
 }
 
 /// One laid-out line's ascent, descent and leading, as the line loop stacks it. `fallback` is
-/// the paragraph's first style, used for a line with no glyph runs. With Dynamic Text (`fit`)
-/// the leading is the line's natural height plus the line gap, a percentage of its largest size.
+/// the paragraph's first style, used for a line with no glyph runs. With Dynamic Text (`line_gap`,
+/// percent) the leading is the line's natural height plus the line gap, a percentage of its largest size.
 fn line_metrics(
     line: &parley::Line<'_, RunBrush>,
     styles: &[CharStyle],
@@ -1287,7 +1288,7 @@ fn line_metrics(
     k: f32,
     fallback: &CharStyle,
     vertical: bool,
-    fit: Option<&TextFit>,
+    line_gap: Option<f32>,
 ) -> LineMetrics {
     let first_px = fallback.size_pt * k;
     let m = line.metrics();
@@ -1315,9 +1316,9 @@ fn line_metrics(
     } else {
         (first_px * 0.8, first_px * 0.2)
     };
-    if let Some(f) = fit {
+    if let Some(gap) = line_gap {
         let px = if max_px > 0.0 { max_px } else { first_px };
-        leading = ascent + descent + f.line_gap / 100.0 * px;
+        leading = ascent + descent + gap / 100.0 * px;
     }
     LineMetrics { ascent, descent, leading }
 }
@@ -1331,9 +1332,9 @@ fn area_metrics(
     k: f32,
     fallback: &CharStyle,
     vertical: bool,
-    fit: Option<&TextFit>,
+    line_gap: Option<f32>,
 ) -> LineMetrics {
-    layout.lines().map(|line| line_metrics(&line, styles, ps, k, fallback, vertical, fit)).fold(
+    layout.lines().map(|line| line_metrics(&line, styles, ps, k, fallback, vertical, line_gap)).fold(
         LineMetrics { ascent: 0.0, descent: 0.0, leading: 0.0 },
         |a, b| LineMetrics { ascent: a.ascent.max(b.ascent), descent: a.descent.max(b.descent), leading: a.leading.max(b.leading) },
     )
