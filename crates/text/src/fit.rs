@@ -166,20 +166,43 @@ pub fn is_fitted_box(layer: &TextLayer) -> bool {
     layer.fit.as_ref().is_some_and(|f| !f.valid_lines(&layer.text).is_empty()) && matches!(layer.shape, TextShape::Box { .. })
 }
 
-/// Line shrink factors `bake` tries in turn, to keep wrapped lines from wrapping again.
+/// Whether every glyph of `b` is within 0.5 px of the same glyph of `a`, in order. A fitted
+/// layout shapes each solved line alone and has an invisible direction mark per line (and the
+/// spaces a break replaced) that the baked layout lacks: those are skipped.
+fn same_glyphs(a: &crate::TextLayout, b: &crate::TextLayout) -> bool {
+    let mut from = 0;
+    for q in &b.glyphs {
+        let found = a.glyphs.get(from..).and_then(|rest| rest.iter().position(|p| p.id == q.id && (p.x - q.x).abs() <= 0.5 && (p.y - q.y).abs() <= 0.5));
+        let Some(off) = found else { return false };
+        from += off + 1;
+    }
+    true
+}
+
+/// Line shrink factors `bake` tries in turn.
 const MARGINS: [f32; 4] = [1.0 - 1e-5, 0.999, 0.99, 0.95];
 
 /// Bakes a solved Dynamic Text box into ordinary type: each line's runs get their size times the
-/// line's scale (leading and baseline shift follow, as layout does), a forced line break is put at
-/// every line start that does not already follow a break, the line gap becomes each line's
-/// explicit leading and the word gap extra tracking on its spaces. The result has no `fit` and
-/// lays out like the fitted layer (glyphs within 0.5 px); this is what Release and PSD export use.
+/// line's scale (leading and baseline shift follow, as layout does), and a forced line break
+/// takes the place of the space each line ends with (or is inserted where the line follows no
+/// space). Wrapped text counts a trailing space against the box, and the solved lines span it
+/// exactly, so keeping the space would wrap a word early; the break replaces it and the runs
+/// stay plain. The line gap becomes each line's explicit leading.
+///
+/// Known limitation: the word gap becomes extra tracking on each space inside a line (read from
+/// the difference in that space's measured advance), an approximation of word spacing: it also
+/// shows if text is typed in front of that space.
+///
+/// The result has no `fit` and lays out like the fitted layer (glyphs within 0.5 px); this is
+/// what Release and PSD export use. It is verified: when the baked layout does not have the
+/// fitted layout's lines, or the text cannot be cut cleanly, the result is an error naming the
+/// cause and nothing is returned.
 ///
 /// Anything that is not a fitted box with solved lines (Area text, no lines yet) only loses its
-/// `fit`: Area text already holds its fitted sizes. `engine` measures the gaps' effect.
-pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> TextLayer {
+/// `fit`: Area text already holds its fitted sizes. `engine` measures the layout.
+pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Result<TextLayer, String> {
     use crate::layout::{FORCED_LINE_BREAK, scaled_style};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     let mut out = layer.clone();
     let lines: Vec<FitLine> = match &layer.fit {
@@ -188,25 +211,32 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Text
     };
     out.fit = None;
     if lines.is_empty() || layer.text.is_empty() {
-        return out;
+        return Ok(out);
     }
     replace_non_finite(&mut out);
     let text = &layer.text;
     let k = if dpi.is_finite() && dpi > 0.0 { dpi / 72.0 } else { 1.0 };
     let (word_gap, line_gap) = layer.fit.as_ref().map_or((0.0, 0.0), TextFit::gaps);
 
-    // Where a break is inserted: a line start (not the first) that does not already follow one.
-    let inserts: BTreeSet<usize> = lines
-        .iter()
-        .skip(1)
-        .map(|l| l.start as usize)
-        .filter(|&p| p > 0 && p < text.len() && !text.get(..p).is_some_and(|s| s.ends_with(['\r', '\n', FORCED_LINE_BREAK])))
-        .collect();
+    // Where each line break goes: the spaces before a line start (possibly none) become one
+    // forced break, unless the line follows a break already (or nothing).
+    let mut breaks: BTreeMap<usize, usize> = BTreeMap::new();
+    for l in lines.iter().skip(1) {
+        let p = l.start as usize;
+        let mut q = p;
+        while q > 0 && text.as_bytes().get(q - 1) == Some(&b' ') {
+            q -= 1;
+        }
+        if p == 0 || p >= text.len() || text.get(..q).is_none_or(|s| s.is_empty() || s.ends_with(['\r', '\n', FORCED_LINE_BREAK])) {
+            continue;
+        }
+        breaks.insert(q, p);
+    }
 
-    // The fitted layout, and the same without the word gap: the difference of a space's advance is
+    // The fitted layout, and the same without the word gap: the difference of a space advance is
     // what the gap added.
     let fitted = engine.layout(layer, dpi);
-    let mut space_extra: std::collections::BTreeMap<usize, (usize, f32)> = std::collections::BTreeMap::new();
+    let mut space_extra: BTreeMap<usize, (usize, f32)> = BTreeMap::new();
     if word_gap != 0.0 {
         let mut plain_layer = layer.clone();
         plain_layer.cache = None;
@@ -217,27 +247,17 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Text
         let plain = engine.layout(&plain_layer, dpi);
         let by_start: std::collections::HashMap<usize, f32> = plain.clusters.iter().map(|c| (c.range.start, c.advance)).collect();
         for c in fitted.clusters.iter().filter(|c| matches!(text.get(c.range.clone()), Some(" " | "\u{a0}"))) {
+            // A space that a break replaces is gone: no tracking for it.
+            if breaks.iter().any(|(&q, &p)| c.range.start >= q && c.range.start < p) {
+                continue;
+            }
             if let Some(delta) = by_start.get(&c.range.start).map(|p| c.advance - p).filter(|d| d.is_finite() && d.abs() > 1e-4) {
                 space_extra.insert(c.range.start, (c.range.end, delta));
             }
         }
     }
-    // The spaces a line ends with take no width: wrapped text would count them against the box
-    // (the solved lines span it exactly), so the baked break would wrap one word early.
-    let advance: std::collections::HashMap<usize, f32> =
-        fitted.clusters.iter().filter(|c| text.get(c.range.clone()) == Some(" ")).map(|c| (c.range.start, c.advance)).collect();
-    for &p in &inserts {
-        let mut q = p;
-        while q > 0 && text.as_bytes().get(q - 1) == Some(&b' ') {
-            q -= 1;
-            if let Some(&adv) = advance.get(&q) {
-                let entry = space_extra.entry(q).or_insert((q + 1, 0.0));
-                entry.1 -= adv;
-            }
-        }
-    }
 
-    // Pieces: cut at run edges, line starts and the spaces that get extra tracking.
+    // Pieces: cut at run edges, line starts, break ranges and the spaces that get extra tracking.
     let runs = out.char_runs();
     let mut cuts: BTreeSet<usize> = BTreeSet::from([0, text.len()]);
     let mut at = 0usize;
@@ -246,10 +266,18 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Text
         cuts.insert(at);
     }
     cuts.extend(lines.iter().map(|l| l.start as usize).filter(|&p| p <= text.len()));
+    for (&q, &p) in &breaks {
+        cuts.extend([q, p]);
+    }
     for (&a, &(z, _)) in &space_extra {
         cuts.extend([a, z]);
     }
-    let mut cuts: Vec<usize> = cuts.into_iter().collect();
+    // A last empty paragraph (the text ends with a paragraph break) has no character of its own
+    // and takes the style of the break before it: that break gets the empty line's own style.
+    let break_len = if text.ends_with("\r\n") { 2 } else { 1 };
+    let terminal = (lines.last().is_some_and(|l| l.start as usize >= text.len()) && text.ends_with(['\r', '\n'])).then(|| text.len().saturating_sub(break_len));
+    cuts.extend(terminal);
+    let cuts: Vec<usize> = cuts.into_iter().collect();
     let mut run_ends = Vec::with_capacity(runs.len());
     let mut at = 0usize;
     for r in &runs {
@@ -257,26 +285,19 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Text
         run_ends.push(at);
     }
     let run_at = |off: usize| run_ends.partition_point(|&e| e <= off).min(runs.len().saturating_sub(1));
-    // A last empty paragraph (the text ends with a paragraph break) has no character of its own
-    // and takes the style of the break before it: that break gets the empty line's own style.
-    let break_len = if text.ends_with("\r\n") { 2 } else { 1 };
-    let terminal = (lines.last().is_some_and(|l| l.start as usize >= text.len()) && text.ends_with(['\r', '\n'])).then(|| text.len().saturating_sub(break_len));
-    if let Some(t) = terminal {
-        cuts.push(t);
-        cuts.sort_unstable();
-        cuts.dedup();
-    }
     let line_at = |off: usize| match terminal {
         Some(t) if off >= t => lines.len().saturating_sub(1),
         _ => lines.partition_point(|l| l.start as usize <= off).saturating_sub(1),
     };
+    let removed = |off: usize| breaks.iter().any(|(&q, &p)| off >= q && off < p);
 
     // Each line's leading: its natural height as laid out plus the gap, a percent of its largest size.
     let mut line_size = vec![0.0f32; lines.len()];
     for w in cuts.windows(2) {
-        let (Some(&a), Some(run)) = (w.first(), runs.get(run_at(w[0]))) else { continue };
-        if let Some(sz) = line_size.get_mut(line_at(a)) {
-            let scale = lines.get(line_at(a)).map_or(1.0, |l| l.scale);
+        let Some(run) = runs.get(run_at(w[0])) else { continue };
+        let li = line_at(w[0]);
+        if let Some(sz) = line_size.get_mut(li) {
+            let scale = lines.get(li).map_or(1.0, |l| l.scale);
             *sz = sz.max(scaled_style(&run.style, scale).size_pt);
         }
     }
@@ -289,15 +310,19 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Text
         })
         .collect();
 
-    // Wrapped text breaks a line that is a hair wider than the box, and the solved lines span it
-    // exactly: shrink every line by a margin, the smallest one that keeps the fitted line count.
-    let assemble = |margin: f32| -> TextLayer {
+    // The solved lines span the box exactly, and wrapped text breaks a line that is a hair wider
+    // than its width: every line shrinks by a margin, the smallest of MARGINS that keeps the
+    // fitted line count. Each try is verified; none fitting is an error.
+    let assemble = |engine: &mut crate::TextEngine, margin: f32| -> Result<TextLayer, String> {
         let mut out = out.clone();
-        let mut new_text = String::with_capacity(text.len() + inserts.len());
+        let mut new_text = String::with_capacity(text.len());
         let mut new_runs: Vec<(usize, photocraft_doc::text::CharStyle)> = Vec::new();
         for w in cuts.windows(2) {
             let (a, z) = (w[0], w[1]);
-            let Some(piece) = text.get(a..z).filter(|p| !p.is_empty()) else { continue };
+            if a == z || removed(a) {
+                continue;
+            }
+            let piece = text.get(a..z).ok_or_else(|| format!("the text cannot be cut at byte {a}..{z}"))?;
             let li = line_at(a);
             let base = runs.get(run_at(a)).map(|r| r.style.clone()).unwrap_or_default();
             let mut style = scaled_style(&base, lines.get(li).map_or(1.0, |l| l.scale) * margin);
@@ -305,14 +330,16 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Text
                 style.leading_pt = Some(lead);
             }
             if let Some(&(_, delta)) = space_extra.get(&a) {
-                let px = style.size_pt * k;
+                // Word spacing is added to the shaped advance, before the horizontal scale stretches
+                // it; tracking is added after shaping and scaled with it. Divide the scale back out.
+                let px = style.size_pt * k * if style.horizontal_scale > 0.0 { style.horizontal_scale } else { 1.0 };
                 if px > 0.0 {
                     style.tracking += delta / px * 1000.0;
                 }
             }
             new_text.push_str(piece);
             let mut len = piece.len();
-            if inserts.contains(&z) {
+            if breaks.contains_key(&z) {
                 new_text.push(FORCED_LINE_BREAK);
                 len += FORCED_LINE_BREAK.len_utf8();
             }
@@ -321,8 +348,11 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Text
                 _ => new_runs.push((len, style)),
             }
         }
-        // An original offset in the new text: the breaks inserted before it come along.
-        let moved = |off: usize| off + inserts.range(..=off).count();
+        // An original offset in the new text: each break before it replaces its spaces by one char.
+        let moved = |off: usize| {
+            let shift: isize = breaks.iter().filter(|&(_, &p)| p <= off).map(|(&q, &p)| 1 - (p - q) as isize).sum();
+            off.saturating_add_signed(shift)
+        };
         let mut new_paras = Vec::new();
         let mut at = 0usize;
         for p in layer.paragraph_runs() {
@@ -334,17 +364,23 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Text
         out.runs = new_runs.into_iter().map(|(len, style)| TextRun { len, style }).collect();
         out.paragraphs = new_paras;
         out.sync_summary();
-        out
+        let baked = engine.layout(&out, dpi);
+        if baked.lines.len() != fitted.lines.len() {
+            return Err(format!("the baked text lays out in {} lines, not the fitted {}", baked.lines.len(), fitted.lines.len()));
+        }
+        if !same_glyphs(&fitted, &baked) {
+            return Err("the baked text lays out with glyphs more than 0.5 px from the fitted look, in lines".to_string());
+        }
+        Ok(out)
     };
-    let want = fitted.lines.len();
-    let mut baked = assemble(MARGINS[0]);
-    for &margin in &MARGINS[1..] {
-        if engine.layout(&baked, dpi).lines.len() == want {
+    let mut result = Err(String::new());
+    for margin in MARGINS {
+        result = assemble(engine, margin);
+        if result.is_ok() {
             break;
         }
-        baked = assemble(margin);
     }
-    baked
+    result
 }
 
 /// Exact layouts after the search: each lays out the chosen lines and corrects every scale by
@@ -448,7 +484,10 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
     let mut point = base.clone();
     point.shape = TextShape::Point;
     let measured = engine.layout(&point, dpi);
-    let Some((segs, visited)) = segments(&base, &measured, k, box_w) else { return none };
+    let Some((segs, visited)) = segments(&base, &measured, k, box_w) else {
+        // Nothing to measure the lines with: no solved lines, and the text is not known to fit.
+        return Solved { fits: false, ..none };
+    };
     if segs.is_empty() {
         return none;
     }
@@ -1319,13 +1358,14 @@ THREE",
             let Some(off) = found else { panic!("glyph {i} at ({}, {}) has no match in the fitted layout", q.x, q.y) };
             from += off + 1;
         }
-        assert!(a.glyphs.len() - b.glyphs.len() <= a.lines.len(), "{} vs {} glyphs", a.glyphs.len(), b.glyphs.len());
+        // A direction mark per fitted line, and the space each baked break replaced.
+        assert!(a.glyphs.len() - b.glyphs.len() <= 2 * a.lines.len(), "{} vs {} glyphs", a.glyphs.len(), b.glyphs.len());
     }
 
     fn baked_matches(t: TextLayer) -> TextLayer {
         let mut e = TextEngine::new();
         let (t, fitted) = solved(&mut e, t);
-        let baked = bake(&mut e, &t, 72.0);
+        let baked = bake(&mut e, &t, 72.0).unwrap();
         assert!(baked.fit.is_none());
         assert_same_look(&fitted, &e.layout(&baked, 72.0));
         baked
@@ -1342,7 +1382,7 @@ THREE",
         let baked = baked_matches(fit_box(FOX, 12.0, 400.0, 300.0));
         assert!(sizes(&baked).len() >= 2, "{:?}", sizes(&baked));
         assert!(baked.text.contains(FORCED_BREAK), "{:?}", baked.text);
-        assert_eq!(baked.text.replace(FORCED_BREAK, ""), FOX);
+        assert_eq!(baked.text.replace(FORCED_BREAK, " "), FOX, "each break replaces a space");
         let total: usize = baked.char_runs().iter().map(|r| r.len).sum();
         assert_eq!(total, baked.text.len());
         let para: usize = baked.paragraph_runs().iter().map(|r| r.len).sum();
@@ -1383,13 +1423,13 @@ THREE",
     fn bake_of_unfitted_or_area_text_only_drops_the_fit() {
         let mut e = TextEngine::new();
         let mut t = box_layer(FOX, 12.0, (0.0, 0.0, 300.0, 100.0));
-        assert_eq!(bake(&mut e, &t, 72.0), t);
+        assert_eq!(bake(&mut e, &t, 72.0).unwrap(), t);
         t.fit = Some(TextFit::default());
-        let b = bake(&mut e, &t, 72.0);
+        let b = bake(&mut e, &t, 72.0).unwrap();
         assert!(b.fit.is_none() && b.text == t.text, "no solved lines: nothing to bake");
         let mut a = area_ellipse_layer("Hello world", 12.0, 200.0, 100.0);
         a.fit = Some(TextFit::default());
-        let b = bake(&mut e, &a, 72.0);
+        let b = bake(&mut e, &a, 72.0).unwrap();
         assert!(b.fit.is_none() && b.text == a.text);
     }
 
@@ -1400,7 +1440,82 @@ THREE",
         if let Some(f) = t.fit.as_mut() {
             f.lines = vec![FitLine { start: 0, scale: 50.0 }];
         }
-        let b = bake(&mut e, &t, 72.0);
+        let b = bake(&mut e, &t, 72.0).unwrap();
         assert!(b.char_runs().iter().all(|r| r.style.size_pt <= MAX_PT && r.style.size_pt >= MIN_PT));
+    }
+
+    #[test]
+    fn bake_replaces_line_ending_spaces_with_the_break() {
+        let mut e = TextEngine::new();
+        let baked = baked_matches(fit_box(FOX, 12.0, 400.0, 300.0));
+        assert!(!baked.text.contains(" \u{3}"), "{:?}", baked.text);
+        assert!(
+            baked.char_runs().iter().all(|r| r.style.tracking == 0.0),
+            "plain runs: {:?}",
+            baked.char_runs().iter().map(|r| r.style.tracking).collect::<Vec<_>>()
+        );
+        // Typing at a former line end takes the run's plain tracking.
+        let at = baked.text.find('\u{3}').unwrap();
+        let mut typed = baked.clone();
+        typed.text.insert(at, 'x');
+        let _ = e.layout(&typed, 72.0);
+        let run = baked
+            .char_runs()
+            .iter()
+            .scan(0, |a, r| {
+                *a += r.len;
+                Some((*a, r.style.tracking))
+            })
+            .find(|(end, _)| *end > at)
+            .map(|(_, t)| t);
+        assert_eq!(run, Some(0.0));
+    }
+
+    #[test]
+    fn bake_keeps_the_look_with_horizontal_scale_and_word_gap() {
+        let make = |hs: f32| {
+            let mut t = fit_box(FOX, 12.0, 400.0, 400.0);
+            t.runs = vec![TextRun { len: FOX.len(), style: photocraft_doc::text::CharStyle { horizontal_scale: hs, ..t.char_runs()[0].style.clone() } }];
+            if let Some(f) = t.fit.as_mut() {
+                f.word_gap = 60.0;
+            }
+            t
+        };
+        // Wider type: the word gap tracking is not scaled twice.
+        baked_matches(make(1.3));
+        // Narrower type: wrapping sees the unscaled width, which is wider than the box, so a baked
+        // line would wrap. That is refused, not returned wrong.
+        let mut e = TextEngine::new();
+        let (t, _) = solved(&mut e, make(0.8));
+        match bake(&mut e, &t, 72.0) {
+            Ok(b) => assert_same_look(&e.layout(&t, 72.0), &e.layout(&b, 72.0)),
+            Err(m) => assert!(m.contains("lines"), "{m}"),
+        }
+    }
+
+    #[test]
+    fn bake_refuses_a_look_it_cannot_keep() {
+        let mut e = TextEngine::new();
+        // One solved line for text far wider than the box: the fitted layout never wraps, baked text would.
+        let mut t = fit_box(FOX, 12.0, 100.0, 300.0);
+        if let Some(f) = t.fit.as_mut() {
+            f.lines = vec![FitLine { start: 0, scale: 1.0 }];
+        }
+        let err = bake(&mut e, &t, 72.0).unwrap_err();
+        assert!(err.contains("line"), "{err}");
+    }
+
+    #[test]
+    fn bake_goes_past_the_first_margin_and_keeps_half_a_pixel() {
+        let mut e = TextEngine::new();
+        let (mut t, _) = solved(&mut e, fit_box(FOX, 12.0, 400.0, 400.0));
+        // Lines 0.05 % wider than the box: the first margin (0.001 %) leaves them wrapping.
+        if let Some(f) = t.fit.as_mut() {
+            f.lines.iter_mut().for_each(|l| l.scale *= 1.0005);
+        }
+        let fitted = e.layout(&t, 72.0);
+        let baked = bake(&mut e, &t, 72.0).expect("a later margin keeps the lines");
+        let bl = e.layout(&baked, 72.0);
+        assert_same_look(&fitted, &bl);
     }
 }
