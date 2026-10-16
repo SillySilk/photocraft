@@ -2255,12 +2255,17 @@ mod dynamic_text_ui {
         h.get_by_label("Dynamic Text").click();
         h.run_steps(3);
         assert!(fitted(&h, id));
-        let size = text(h.state(), id).size_pt;
-        assert!(size > 12.0, "fills the box: {size}");
+        // Box text keeps its base size; its solved line is scaled up to fill the box.
+        let t = text(h.state(), id);
+        let scale = t.fit.as_ref().and_then(|f| f.lines.first()).map_or(0.0, |l| l.scale);
+        assert!(t.size_pt == 12.0 && scale > 1.0, "fills the box: {} x {scale}", t.size_pt);
         h.get_by_label("Dynamic Text").click();
         h.run_steps(3);
         assert!(!fitted(&h, id));
-        assert_eq!(text(h.state(), id).size_pt, size, "release keeps the fitted size");
+        // Release keeps the per-line look: sizes and breaks are baked into the runs.
+        let t = text(h.state(), id);
+        assert!(t.runs.iter().any(|r| r.style.size_pt > 12.0), "the line stays big: {:?}", t.runs.iter().map(|r| r.style.size_pt).collect::<Vec<_>>());
+        assert!(t.size_pt > 12.0, "summary follows the first run: {}", t.size_pt);
     }
 
     #[test]
@@ -2292,6 +2297,25 @@ mod dynamic_text_ui {
         h.run_steps(3);
         assert!(h.query_by_label("Line Gap").is_none());
         assert!(!h.get_by_label("Font size").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn word_gap_slider_goes_down_to_minus_100() {
+        let (app, id) = app_with_box_text("Hello there", 12.0);
+        let mut h = bar(app, true);
+        h.state_mut().run("type.convertToDynamicText", json!({})).unwrap();
+        h.state_mut().run("type.setDynamicText", json!({"wordGap": 37})).unwrap();
+        h.run_steps(3);
+        let field = h.get_all_by_role(Role::SpinButton).find(|n| n.accesskit_node().numeric_value() == Some(37.0)).expect("Word Gap field");
+        field.click();
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.run_steps(1);
+        h.event(egui::Event::Text("-100".into()));
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(text(h.state(), id).fit.as_ref().map(|f| f.word_gap), Some(-100.0));
     }
 
     fn toggle_disabled(h: &Harness<'static, PhotocraftApp>) -> bool {

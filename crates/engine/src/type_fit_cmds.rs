@@ -94,29 +94,41 @@ fn convert(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn release(s: &mut Session, p: &Value) -> Result<Value> {
     single_layer(s, RELEASE, p)?;
-    with_text(s, p, "Release Dynamic Text", |t, _| {
-        // The fitted sizes stay: only the fit is turned off.
-        t.fit.take().map(|_| ()).ok_or_else(|| bad(RELEASE, NOT_FITTED))
+    with_text(s, p, "Release Dynamic Text", |t, doc| {
+        if t.fit.is_none() {
+            return Err(bad(RELEASE, NOT_FITTED));
+        }
+        // The fitted look becomes ordinary type: a size and a break per line. Layers the solver
+        // never fitted (vertical, right-to-left) have no solved lines to bake.
+        if fit_refusal(t).is_some() {
+            t.fit = None;
+        } else {
+            let mut eng = photocraft_text::shared().lock().unwrap_or_else(|e| e.into_inner());
+            let baked = photocraft_text::fit::bake(&mut eng, t, doc.resolution_dpi)
+                .map_err(|m| bad(RELEASE, &format!("the fitted look cannot be kept as ordinary type: {m}")))?;
+            *t = baked;
+        }
+        Ok(())
     })?;
     Ok(json!({"fit": false}))
 }
 
 /// A gap param: absent (or null) keeps the current gap; otherwise a number in
-/// `GAP_MIN..=GAP_MAX` percent.
-fn gap(p: &Value, key: &str) -> Result<Option<f32>> {
+/// `min..=GAP_MAX` percent (`min` differs per key).
+fn gap(p: &Value, key: &str, min: f32) -> Result<Option<f32>> {
     match p.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(v) => {
-            let range = f64::from(TextFit::GAP_MIN)..=f64::from(TextFit::GAP_MAX);
+            let range = f64::from(min)..=f64::from(TextFit::GAP_MAX);
             let n = v.as_f64().filter(|n| range.contains(n));
-            n.map(|n| Some(n as f32)).ok_or_else(|| bad(SET, &format!("\"{key}\" must be a number from {} to {} percent", TextFit::GAP_MIN, TextFit::GAP_MAX)))
+            n.map(|n| Some(n as f32)).ok_or_else(|| bad(SET, &format!("\"{key}\" must be a number from {} to {} percent", min, TextFit::GAP_MAX)))
         }
     }
 }
 
 fn set_gaps(s: &mut Session, p: &Value) -> Result<Value> {
     single_layer(s, SET, p)?;
-    let (word, line) = (gap(p, "wordGap")?, gap(p, "lineGap")?);
+    let (word, line) = (gap(p, "wordGap", TextFit::WORD_GAP_MIN)?, gap(p, "lineGap", TextFit::LINE_GAP_MIN)?);
     if word.is_none() && line.is_none() {
         return Err(bad(SET, "give wordGap or lineGap"));
     }
@@ -128,7 +140,7 @@ fn set_gaps(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(l) = line {
             fit.line_gap = l;
         }
-        Ok(*fit)
+        Ok(fit.clone())
     })?;
     Ok(json!({"wordGap": fit.word_gap, "lineGap": fit.line_gap}))
 }
@@ -150,7 +162,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Release Dynamic Text",
             menu: &["Type"],
             shortcut: None,
-            params: r##"{"layer":id? (default active Type layer)} → fit off; the fitted sizes are kept"##,
+            params: r##"{"layer":id? (default active Type layer)} → fit off; a box keeps its look as ordinary type (a size and a line break per line), an area its fitted size"##,
             enabled: has_fit,
             journal: true,
             run: release,
@@ -160,7 +172,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Dynamic Text Options",
             menu: &[],
             shortcut: None,
-            params: r##"{"layer":id? (default active Type layer),"wordGap":-50..200? (percent of the type size, added to each space),"lineGap":-50..200? (percent of the type size, added to each line advance)} → refits"##,
+            params: r##"{"layer":id? (default active Type layer),"wordGap":-100..200? (percent of each space's own width, added to it: -100 removes the spaces),"lineGap":-50..200? (percent of the type size, added to each line advance)} → refits"##,
             enabled: has_fit,
             journal: true,
             run: set_gaps,

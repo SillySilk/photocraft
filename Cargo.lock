@@ -4990,6 +4990,7 @@ name = "photocraft-text"
 version = "0.9.0"
 dependencies = [
  "flate2",
+ "icu_properties",
  "parley",
  "photocraft-color",
  "photocraft-doc",

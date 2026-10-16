@@ -1,5 +1,5 @@
 use super::*;
-use photocraft_doc::text::{TextFit, TextShape};
+use photocraft_doc::text::TextShape;
 use photocraft_doc::vector::{Path, Subpath};
 use photocraft_doc::{LayerContent, LayerId, TextLayer};
 use serde_json::json;
@@ -33,6 +33,15 @@ fn text(s: &Session, id: LayerId) -> TextLayer {
     }
 }
 
+/// Largest and smallest effective type size of a solved Dynamic Text box (base size × line
+/// scale). Box text keeps its base size; each solved line carries its own scale.
+fn effective(s: &Session, id: LayerId) -> (f32, f32) {
+    let t = text(s, id);
+    let lines = t.fit.as_ref().map(|f| f.lines.clone()).unwrap_or_default();
+    assert!(!lines.is_empty(), "solved lines: {:?}", t.fit);
+    lines.iter().map(|l| t.size_pt * l.scale).fold((f32::MIN, f32::MAX), |(hi, lo), v| (hi.max(v), lo.min(v)))
+}
+
 fn history_len(s: &Session) -> usize {
     s.active().unwrap().history.entries().len()
 }
@@ -50,7 +59,8 @@ fn convert_fits_box_text_in_one_step() {
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
     assert_eq!(history_len(&s), before + 1);
     let t = text(&s, id);
-    assert!(t.fit.is_some() && t.size_pt > 12.0, "fills the big box: {}", t.size_pt);
+    assert!(t.fit.is_some() && t.size_pt == 12.0, "base size kept: {}", t.size_pt);
+    assert!(effective(&s, id).1 > 12.0, "fills the big box: {:?}", effective(&s, id));
     assert!(!s.is_enabled("type.convertToDynamicText"), "already Dynamic Text");
     assert!(s.is_enabled("type.releaseDynamicText") && s.is_enabled("type.setDynamicText"));
     // Converting twice is refused without a history step.
@@ -89,40 +99,118 @@ fn area_text_fits() {
 fn typing_refits_and_stays_bounded() {
     let (mut s, id) = session_with_box_text("Hi", 12.0, [0.0, 0.0, 200.0, 80.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
-    let big = text(&s, id).size_pt;
+    let big = effective(&s, id).0;
     s.execute("type.edit", json!({"layer": id.0, "text": "Hi ".repeat(400)})).unwrap();
-    let small = text(&s, id).size_pt;
-    assert!(small < big && small >= photocraft_text::fit::MIN_PT - 1e-4, "{big} -> {small}");
+    let (small, smallest) = effective(&s, id);
+    assert!(small < big && smallest >= photocraft_text::fit::MIN_PT - 1e-4, "{big} -> {small}");
 }
 
 #[test]
-fn resize_then_undo_restores_box_and_size() {
+fn resize_then_undo_restores_box_and_lines() {
     let (mut s, id) = session_with_box_text("Hello there", 12.0, [0.0, 0.0, 300.0, 100.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
-    let (shape0, size0) = (text(&s, id).shape.clone(), text(&s, id).size_pt);
+    let (shape0, fit0, size0) = (text(&s, id).shape.clone(), text(&s, id).fit, effective(&s, id).0);
     let before = history_len(&s);
     s.execute("type.edit", json!({"layer": id.0, "box": [0.0, 0.0, 120.0, 100.0]})).unwrap();
     assert_eq!(history_len(&s), before + 1);
-    assert!(text(&s, id).size_pt < size0);
+    assert!(effective(&s, id).0 < size0);
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(text(&s, id).shape, shape0);
-    assert!((text(&s, id).size_pt - size0).abs() < 1e-4);
+    assert_eq!(text(&s, id).fit, fit0, "box and solved lines come back in one step");
+}
+
+/// Glyph pen positions (px) of a layer, as the shared text engine lays it out at the document's dpi.
+fn glyphs(s: &Session, id: LayerId) -> Vec<(u32, f32, f32)> {
+    let dpi = s.active().unwrap().doc.resolution_dpi;
+    let mut eng = photocraft_text::shared().lock().unwrap_or_else(|e| e.into_inner());
+    eng.layout(&text(s, id), dpi).glyphs.iter().map(|g| (g.id, g.x, g.y)).collect()
+}
+
+fn run_sizes(t: &TextLayer) -> Vec<f32> {
+    let mut v: Vec<f32> = t.char_runs().iter().map(|r| r.style.size_pt).collect();
+    v.dedup();
+    v
 }
 
 #[test]
 fn release_keeps_sizes() {
-    let (mut s, id) = session_with_box_text("Hello", 12.0, [0.0, 0.0, 300.0, 100.0]);
+    let (mut s, id) = session_with_box_text("Hello dynamic world of text", 12.0, [0.0, 0.0, 300.0, 150.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
-    let size = text(&s, id).size_pt;
+    let (hi, lo) = effective(&s, id);
     s.execute("type.releaseDynamicText", json!({"layer": id.0})).unwrap();
-    assert!(text(&s, id).fit.is_none() && (text(&s, id).size_pt - size).abs() < 1e-4);
+    let t = text(&s, id);
+    assert!(t.fit.is_none());
+    // The fitted look is now ordinary runs: the base 12 pt is gone, each line has its own size.
+    let sizes = run_sizes(&t);
+    assert!(sizes.len() >= 2 && sizes.iter().all(|&v| v >= lo - 0.05 && v <= hi + 0.05), "{sizes:?} vs {lo}..{hi}");
+    assert!(t.text.contains('\u{3}'), "{:?}", t.text);
     let before = history_len(&s);
     assert!(s.execute("type.releaseDynamicText", json!({"layer": id.0})).unwrap_err().to_string().contains("not Dynamic Text"));
     assert!(s.execute("type.setDynamicText", json!({"layer": id.0, "lineGap": 10})).unwrap_err().to_string().contains("not Dynamic Text"));
     assert_eq!(history_len(&s), before);
-    // Released text no longer refits: a smaller box keeps the size.
-    s.execute("type.edit", json!({"layer": id.0, "box": [0.0, 0.0, 60.0, 100.0]})).unwrap();
-    assert!((text(&s, id).size_pt - size).abs() < 1e-4);
+    // Released text no longer refits: a smaller box keeps the sizes.
+    s.execute("type.edit", json!({"layer": id.0, "box": [0.0, 0.0, 60.0, 150.0]})).unwrap();
+    assert_eq!(run_sizes(&text(&s, id)), sizes);
+}
+
+#[test]
+fn release_bakes_without_moving_glyphs() {
+    let (mut s, id) = session_with_box_text("Hello dynamic world of text", 12.0, [0.0, 0.0, 300.0, 150.0]);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    s.execute("type.setDynamicText", json!({"layer": id.0, "wordGap": 40, "lineGap": 15})).unwrap();
+    let fitted = glyphs(&s, id);
+    assert!(fitted.len() > 20);
+    let before = history_len(&s);
+    s.execute("type.releaseDynamicText", json!({"layer": id.0})).unwrap();
+    assert_eq!(history_len(&s), before + 1);
+    assert!(text(&s, id).fit.is_none());
+    let baked = glyphs(&s, id);
+    assert!(!baked.is_empty());
+    let lines = text(&s, id).text.matches('\u{3}').count() + 1;
+    assert!(fitted.len() - baked.len() <= 2 * lines, "{} fitted vs {} baked glyphs, {lines} lines", fitted.len(), baked.len());
+    // The fitted layout shapes each line alone and keeps an invisible mark glyph per line.
+    let mut from = 0;
+    for (i, g) in baked.iter().enumerate() {
+        let hit = fitted[from..].iter().position(|f| f.0 == g.0 && (f.1 - g.1).abs() <= 0.5 && (f.2 - g.2).abs() <= 0.5);
+        let Some(off) = hit else { panic!("glyph {i} {g:?} moved") };
+        from += off + 1;
+    }
+    // Undo brings the fit back.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(text(&s, id).fit.is_some());
+}
+
+#[test]
+fn typing_recomputes_from_base() {
+    let (mut s, id) = session_with_box_text("Hello dynamic world", 12.0, [0.0, 0.0, 300.0, 150.0]);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    let base = text(&s, id);
+    s.execute("type.edit", json!({"layer": id.0, "text": "Hello dynamic world and a good deal more words"})).unwrap();
+    assert_eq!(run_sizes(&text(&s, id)), vec![12.0], "base sizes untouched while typing");
+    s.execute("type.edit", json!({"layer": id.0, "text": "Hello dynamic world"})).unwrap();
+    let again = text(&s, id);
+    assert_eq!(again.runs, base.runs);
+    assert_eq!(again.size_pt, base.size_pt);
+    assert_eq!(again.fit, base.fit, "same text, same lines");
+}
+
+#[test]
+fn refresh_fills_lines() {
+    let (mut s, id) = session_with_box_text("Hello dynamic world", 12.0, [0.0, 0.0, 300.0, 150.0]);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    // A file saved without solved lines: loaded with the list empty.
+    s.edit("empty lines", |doc, _| {
+        if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content)
+            && let Some(f) = t.fit.as_mut()
+        {
+            f.lines.clear();
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(text(&s, id).fit.unwrap().lines.is_empty());
+    s.execute("type.edit", json!({"layer": id.0, "text": "Hello dynamic world"})).unwrap();
+    assert!(!text(&s, id).fit.unwrap().lines.is_empty());
 }
 
 #[test]
@@ -130,20 +218,35 @@ fn gaps_validate_and_apply() {
     let (mut s, id) = session_with_box_text("a b c d e f", 12.0, [0.0, 0.0, 300.0, 300.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
     let before = history_len(&s);
-    for bad in [json!({"wordGap": "x"}), json!({"lineGap": 1000}), json!({"wordGap": -51}), json!({"lineGap": true}), json!({"wordGap": 200.5})] {
+    for bad in [
+        json!({"wordGap": "x"}),
+        json!({"lineGap": 1000}),
+        json!({"wordGap": -101}),
+        json!({"lineGap": -51}),
+        json!({"lineGap": true}),
+        json!({"wordGap": 200.5}),
+    ] {
         let mut p = bad.clone();
         p["layer"] = json!(id.0);
         let e = s.execute("type.setDynamicText", p).unwrap_err();
         assert!(matches!(e, EngineError::BadParams { ref cmd, .. } if cmd == "type.setDynamicText"), "{bad}: {e}");
     }
     assert_eq!(history_len(&s), before);
-    assert_eq!(text(&s, id).fit, Some(TextFit::default()));
+    let gaps = |s: &Session| text(s, id).fit.map(|f| (f.word_gap, f.line_gap));
+    assert_eq!(gaps(&s), Some((0.0, 0.0)));
     s.execute("type.setDynamicText", json!({"layer": id.0, "lineGap": 50})).unwrap();
     assert_eq!(history_len(&s), before + 1);
     assert_eq!(text(&s, id).fit.unwrap().line_gap, 50.0);
     assert_eq!(text(&s, id).fit.unwrap().word_gap, 0.0, "unspecified gap kept");
     s.execute("type.setDynamicText", json!({"layer": id.0, "wordGap": -50, "lineGap": 200})).unwrap();
-    assert_eq!(text(&s, id).fit, Some(TextFit { word_gap: -50.0, line_gap: 200.0 }));
+    assert_eq!(gaps(&s), Some((-50.0, 200.0)));
+    // Word gap goes down to -100, line gap only to -50; each error names its own range.
+    s.execute("type.setDynamicText", json!({"layer": id.0, "wordGap": -100, "lineGap": -50})).unwrap();
+    assert_eq!(text(&s, id).fit.unwrap().word_gap, -100.0);
+    let e = s.execute("type.setDynamicText", json!({"layer": id.0, "wordGap": -101})).unwrap_err().to_string();
+    assert!(e.contains("-100 to 200"), "{e}");
+    let e = s.execute("type.setDynamicText", json!({"layer": id.0, "lineGap": -51})).unwrap_err().to_string();
+    assert!(e.contains("-50 to 200"), "{e}");
 }
 
 #[test]
@@ -151,9 +254,9 @@ fn bigger_line_gap_shrinks_the_fit() {
     let words = "one two three four five six seven eight nine ten eleven twelve";
     let (mut s, id) = session_with_box_text(words, 12.0, [0.0, 0.0, 200.0, 200.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
-    let size0 = text(&s, id).size_pt;
+    let size0 = effective(&s, id).0;
     s.execute("type.setDynamicText", json!({"layer": id.0, "lineGap": 200})).unwrap();
-    assert!(text(&s, id).size_pt < size0, "{size0} -> {}", text(&s, id).size_pt);
+    assert!(effective(&s, id).0 < size0, "{size0} -> {:?}", effective(&s, id));
 }
 
 #[test]
@@ -236,16 +339,16 @@ fn locked_layer_is_refused() {
 
 #[test]
 fn psd_export_warns_for_dynamic_text() {
-    let (mut s, id) = session_with_box_text("Hello dynamic world", 12.0, [0.0, 0.0, 300.0, 100.0]);
+    let (mut s, id) = session_with_box_text("Hello dynamic world of text", 12.0, [0.0, 0.0, 300.0, 150.0]);
     let doc = s.active().unwrap().doc.clone();
     let plain = photocraft_io::export(&doc, "x.psd", &photocraft_io::ExportOptions::default()).unwrap();
     assert!(!plain.warnings.iter().any(|w| w.contains("Dynamic Text")), "{:?}", plain.warnings);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
-    let size = text(&s, id).size_pt;
+    let (hi, lo) = effective(&s, id);
     let doc = s.active().unwrap().doc.clone();
     let r = photocraft_io::export(&doc, "x.psd", &photocraft_io::ExportOptions::default()).unwrap();
     assert!(r.warnings.iter().any(|w| w.contains("Dynamic Text is saved as regular text")), "{:?}", r.warnings);
-    // The PSD holds plain paragraph text at the fitted size.
+    // The PSD holds the baked look: ordinary paragraph text, a break and a size per line.
     let back = photocraft_io::import("x.psd", &r.bytes).unwrap().document;
     let t = back
         .walk()
@@ -257,7 +360,42 @@ fn psd_export_warns_for_dynamic_text() {
         .expect("still a type layer");
     assert!(t.fit.is_none());
     assert!(matches!(t.shape, TextShape::Box { .. }));
-    assert!((t.size_pt - size).abs() < 0.05, "{} vs {size}", t.size_pt);
+    let sizes = run_sizes(&t);
+    assert!(sizes.len() >= 2 && sizes.iter().all(|&v| v >= lo - 0.1 && v <= hi + 0.1), "{sizes:?} vs {lo}..{hi}");
+    assert!(t.text.contains('\u{3}'), "{:?}", t.text);
+}
+
+#[test]
+fn psd_export_is_baked() {
+    let (mut s, id) = session_with_box_text("Hello dynamic world of text", 12.0, [0.0, 0.0, 300.0, 150.0]);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    // A stale TySh (an older build's, made from the unbaked layer) is replaced too.
+    s.edit("stale", |doc, _| {
+        if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
+            t.psd_raw = Some(std::sync::Arc::new(photocraft_text::psd::build_tysh(&TextLayer { fit: None, ..t.clone() }, 72.0, None)));
+        }
+        Ok(())
+    })
+    .unwrap();
+    let doc = s.active().unwrap().doc.clone();
+    let r = photocraft_io::export(&doc, "x.psd", &photocraft_io::ExportOptions::default()).unwrap();
+    let back = photocraft_io::import("x.psd", &r.bytes).unwrap().document;
+    let t = back
+        .walk()
+        .into_iter()
+        .find_map(|(_, _, l)| match &l.content {
+            LayerContent::Text(t) => Some(t.clone()),
+            _ => None,
+        })
+        .expect("type layer");
+    let want = photocraft_text::fit::bake(&mut photocraft_text::shared().lock().unwrap_or_else(|e| e.into_inner()), &text(&s, id), 72.0).unwrap();
+    assert_eq!(t.text, want.text);
+    assert!(t.text.contains('\u{3}'));
+    let (got, exp) = (run_sizes(&t), run_sizes(&want));
+    assert_eq!(got.len(), exp.len(), "{got:?} vs {exp:?}");
+    assert!(got.iter().zip(&exp).all(|(a, b)| (a - b).abs() < 0.05), "{got:?} vs {exp:?}");
+    // The layer itself is still Dynamic Text.
+    assert!(text(&s, id).fit.is_some());
 }
 
 #[test]
@@ -306,4 +444,41 @@ fn set_dynamic_text_without_gaps_is_refused() {
         }
     }
     assert_eq!(history_len(&s), before);
+}
+
+#[test]
+fn convert_release_convert_stays_sane() {
+    let (mut s, id) = session_with_box_text("Hello dynamic world of text", 12.0, [0.0, 0.0, 300.0, 150.0]);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    s.execute("type.releaseDynamicText", json!({"layer": id.0})).unwrap();
+    let released = run_sizes(&text(&s, id));
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    // The released text is already as big as the box allows, so refitting it scales by about 1.
+    let t = text(&s, id);
+    let lines = t.fit.as_ref().map(|f| f.lines.clone()).unwrap_or_default();
+    assert!(!lines.is_empty() && lines.iter().all(|l| (l.scale - 1.0).abs() < 0.25), "{lines:?} on {released:?}");
+}
+
+#[test]
+fn release_refuses_a_look_it_cannot_keep() {
+    let (mut s, id) = session_with_box_text("The quick brown fox jumps over the lazy dog", 12.0, [0.0, 0.0, 100.0, 150.0]);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    // A file with one solved line for text far wider than the box.
+    s.edit("bad lines", |doc, _| {
+        if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content)
+            && let Some(f) = t.fit.as_mut()
+        {
+            f.lines = vec![photocraft_doc::text::FitLine { start: 0, scale: 1.0 }];
+        }
+        Ok(())
+    })
+    .unwrap();
+    let before = history_len(&s);
+    let e = s.execute("type.releaseDynamicText", json!({"layer": id.0})).unwrap_err();
+    assert!(matches!(e, EngineError::BadParams { ref cmd, .. } if cmd == "type.releaseDynamicText"), "{e}");
+    assert_eq!(history_len(&s), before);
+    assert!(text(&s, id).fit.is_some());
+    let doc = s.active().unwrap().doc.clone();
+    let r = photocraft_io::export(&doc, "x.psd", &photocraft_io::ExportOptions::default()).unwrap();
+    assert!(r.warnings.iter().any(|w| w.contains("could not be baked")), "{:?}", r.warnings);
 }

@@ -2092,15 +2092,15 @@ fn icon_label(ui: &mut egui::Ui, icon: &str, tip: &str) {
 
 /// Word Gap and Line Gap while the target layer is Dynamic Text. A drag is one history step.
 fn dynamic_text_gaps(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    let Some(fit) = target_text(app).and_then(|t| t.fit) else { return };
+    use photocraft_doc::text::TextFit;
+    // Only the two gaps: the fit's solved lines are not copied every frame.
+    let Some((word_gap, line_gap)) = target_text(app).and_then(|t| t.fit.as_ref()).map(|f| (f.word_gap, f.line_gap)) else { return };
     let Some((layer, _)) = target(app) else { return };
     // `slider_row` translates its label, so it gets the English key.
-    for (key, label, current) in [("wordGap", "Word Gap", fit.word_gap), ("lineGap", "Line Gap", fit.line_gap)] {
+    for (key, label, current, min) in [("wordGap", "Word Gap", word_gap, TextFit::WORD_GAP_MIN), ("lineGap", "Line Gap", line_gap, TextFit::LINE_GAP_MIN)] {
         let mut v = current;
         ui.push_id(("dynamic-text-gap", key), |ui| {
-            if crate::widgets::slider_row(ui, label, &mut v, photocraft_doc::text::TextFit::GAP_MIN..=photocraft_doc::text::TextFit::GAP_MAX, "%", None)
-                .changed()
-            {
+            if crate::widgets::slider_row(ui, label, &mut v, min..=TextFit::GAP_MAX, "%", None).changed() {
                 let mut p = json!({"layer": layer, key: v.round()});
                 if let Some(k) = drag_key(ui.ctx()) {
                     p["coalesce"] = json!(k);
@@ -2856,20 +2856,25 @@ mod tests {
         insert(&mut app, "Hello there friend");
         let id = LayerId(app.ui.text_edit.as_ref().unwrap().layer);
         app.run("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+        // Box Dynamic Text keeps its base size; the solved lines carry each line's scale.
+        let lines = |app: &PhotocraftApp| text_layer(&app.session.active().unwrap().doc, id).unwrap().fit.as_ref().unwrap().lines.clone();
         let size = |app: &PhotocraftApp| text_layer(&app.session.active().unwrap().doc, id).unwrap().size_pt;
-        let size0 = size(&app);
+        let (size0, lines0) = (size(&app), lines(&app));
+        assert!(!lines0.is_empty());
         let before = app.session.active().unwrap().history.entries().len();
         // The right edge's middle handle, dragged 100 px narrower in several moves.
         assert!(pointer_down(&mut app, 190.0, 55.0, egui::Modifiers::NONE));
-        let mut last = size0;
+        let mut last = lines0.clone();
         for x in [170.0, 150.0, 120.0, 90.0] {
             pointer_move(&mut app, x, 55.0);
-            let now = size(&app);
-            assert!(now <= last, "refits live: {last} -> {now}");
+            let now = lines(&app);
+            assert!(!now.is_empty() && now != last, "refits live: {last:?} -> {now:?}");
             last = now;
         }
         pointer_up(&mut app, [190.0, 55.0], [90.0, 55.0]);
-        assert!(size(&app) < size0, "{size0} -> {}", size(&app));
+        assert_ne!(lines(&app), lines0);
+        assert!(lines(&app).len() >= lines0.len(), "a narrower box never has fewer lines: {lines0:?} -> {:?}", lines(&app));
+        assert_eq!(size(&app), size0, "the base size is kept");
         assert_eq!(app.session.active().unwrap().history.entries().len(), before + 1);
     }
 
