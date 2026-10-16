@@ -550,3 +550,26 @@ fn auto_direction_right_to_left_text_is_refused() {
     assert_eq!(history_len(&s), before);
     assert_eq!(text(&s, id).text, "Hi שלום");
 }
+
+#[test]
+fn release_and_psd_export_name_condensed_type() {
+    let (mut s, id) = session_with_box_text("The quick brown fox jumps over the lazy dog", 12.0, [0.0, 0.0, 300.0, 300.0]);
+    s.execute("type.setStyle", json!({"layer": id.0, "horizontalScale": 80})).unwrap();
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    let before = history_len(&s);
+    match s.execute("type.releaseDynamicText", json!({"layer": id.0})) {
+        Err(EngineError::BadParams { cmd, msg }) => {
+            assert_eq!(cmd, "type.releaseDynamicText");
+            assert_eq!(msg, "Release Dynamic Text can't keep condensed type (Horizontal Scale below 100%) yet; set it to 100% or more first");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(history_len(&s), before);
+    assert!(text(&s, id).fit.is_some());
+    let name = s.active().unwrap().doc.layer(id).unwrap().name.clone();
+    let doc = s.active().unwrap().doc.clone();
+    let r = photocraft_io::export(&doc, "x.psd", &photocraft_io::ExportOptions::default()).unwrap();
+    let dt: Vec<&String> = r.warnings.iter().filter(|w| w.contains("Dynamic Text")).collect();
+    assert_eq!(dt.len(), 1, "{:?}", r.warnings);
+    assert!(dt[0].contains(&format!("\"{name}\"")) && dt[0].contains("condensed type (Horizontal Scale below 100%)"), "{dt:?}");
+}

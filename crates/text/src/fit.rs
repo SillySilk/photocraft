@@ -184,8 +184,42 @@ fn same_glyphs(a: &crate::TextLayout, b: &crate::TextLayout) -> bool {
     true
 }
 
-/// Line shrink factors `bake` tries in turn.
-const MARGINS: [f32; 4] = [1.0 - 1e-5, 0.999, 0.99, 0.95];
+/// Line shrink factors `bake` tries in turn. A larger shrink moves a wide line's far glyphs
+/// more than half a pixel, which the verification refuses anyway.
+const MARGINS: [f32; 2] = [1.0 - 1e-5, 0.999];
+
+/// Why [`bake`] cannot keep the fitted look as ordinary type.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BakeError {
+    /// A run is condensed (Horizontal Scale below 100%). Box wrapping measures the unscaled
+    /// width, so the baked lines would wrap early.
+    Condensed,
+    /// The baked text lays out in a different number of lines than the fitted look.
+    LineCount { baked: usize, fitted: usize },
+    /// The baked text keeps the lines, but glyphs move more than 0.5 px.
+    Drift,
+    /// The text cannot be cut at a byte range.
+    Cut { start: usize, end: usize },
+}
+
+impl std::fmt::Display for BakeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Condensed => f.write_str("condensed type (Horizontal Scale below 100%) can't be kept yet"),
+            Self::LineCount { baked, fitted } => write!(f, "the baked text lays out in {baked} lines, not the fitted {fitted}"),
+            Self::Drift => f.write_str("the baked text lays out with glyphs more than 0.5 px from the fitted look"),
+            Self::Cut { start, end } => write!(f, "the text cannot be cut at byte {start}..{end}"),
+        }
+    }
+}
+
+impl std::error::Error for BakeError {}
+
+/// Whether a run of `layer`'s text is condensed (Horizontal Scale below 100%), which [`bake`]
+/// refuses. Non-positive and non-finite scales lay out at 100%, so they don't count.
+pub fn has_condensed_type(layer: &TextLayer) -> bool {
+    layer.char_runs().iter().any(|r| r.len > 0 && r.style.horizontal_scale > 0.0 && r.style.horizontal_scale < 1.0)
+}
 
 /// Bakes a solved Dynamic Text box into ordinary type: each line's runs get their size times the
 /// line's scale (leading and baseline shift follow, as layout does), and a forced line break
@@ -201,11 +235,15 @@ const MARGINS: [f32; 4] = [1.0 - 1e-5, 0.999, 0.99, 0.95];
 /// The result has no `fit` and lays out like the fitted layer (glyphs within 0.5 px); this is
 /// what Release and PSD export use. It is verified: when the baked layout does not have the
 /// fitted layout's lines, or the text cannot be cut cleanly, the result is an error naming the
-/// cause and nothing is returned.
+/// cause and nothing is returned. When every margin fails and one of them changed the line
+/// count, that is the cause reported: it is what a later margin's drift came from.
+///
+/// Condensed type (a run with Horizontal Scale below 100%) is refused before baking with
+/// [`BakeError::Condensed`]: box wrapping measures its unscaled width.
 ///
 /// Anything that is not a fitted box with solved lines (Area text, no lines yet) only loses its
 /// `fit`: Area text already holds its fitted sizes. `engine` measures the layout.
-pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Result<TextLayer, String> {
+pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Result<TextLayer, BakeError> {
     use crate::layout::{FORCED_LINE_BREAK, scaled_style};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -217,6 +255,9 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Resu
     out.fit = None;
     if lines.is_empty() || layer.text.is_empty() {
         return Ok(out);
+    }
+    if has_condensed_type(layer) {
+        return Err(BakeError::Condensed);
     }
     replace_non_finite(&mut out);
     let text = &layer.text;
@@ -318,7 +359,7 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Resu
     // The solved lines span the box exactly, and wrapped text breaks a line that is a hair wider
     // than its width: every line shrinks by a margin, the smallest of MARGINS that keeps the
     // fitted line count. Each try is verified; none fitting is an error.
-    let assemble = |engine: &mut crate::TextEngine, margin: f32| -> Result<TextLayer, String> {
+    let assemble = |engine: &mut crate::TextEngine, margin: f32| -> Result<TextLayer, BakeError> {
         let mut out = out.clone();
         let mut new_text = String::with_capacity(text.len());
         let mut new_runs: Vec<(usize, photocraft_doc::text::CharStyle)> = Vec::new();
@@ -327,7 +368,7 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Resu
             if a == z || removed(a) {
                 continue;
             }
-            let piece = text.get(a..z).ok_or_else(|| format!("the text cannot be cut at byte {a}..{z}"))?;
+            let piece = text.get(a..z).ok_or(BakeError::Cut { start: a, end: z })?;
             let li = line_at(a);
             let base = runs.get(run_at(a)).map(|r| r.style.clone()).unwrap_or_default();
             let mut style = scaled_style(&base, lines.get(li).map_or(1.0, |l| l.scale) * margin);
@@ -371,21 +412,23 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Resu
         out.sync_summary();
         let baked = engine.layout(&out, dpi);
         if baked.lines.len() != fitted.lines.len() {
-            return Err(format!("the baked text lays out in {} lines, not the fitted {}", baked.lines.len(), fitted.lines.len()));
+            return Err(BakeError::LineCount { baked: baked.lines.len(), fitted: fitted.lines.len() });
         }
         if !same_glyphs(&fitted, &baked) {
-            return Err("the baked text lays out with glyphs more than 0.5 px from the fitted look, in lines".to_string());
+            return Err(BakeError::Drift);
         }
         Ok(out)
     };
-    let mut result = Err(String::new());
+    // The cause reported: the first line-count failure, else the last failure.
+    let mut cause = BakeError::Drift;
     for margin in MARGINS {
-        result = assemble(engine, margin);
-        if result.is_ok() {
-            break;
+        match assemble(engine, margin) {
+            Ok(b) => return Ok(b),
+            Err(e) if !matches!(cause, BakeError::LineCount { .. }) => cause = e,
+            Err(_) => {}
         }
     }
-    result
+    Err(cause)
 }
 
 /// Exact layouts after the search: each lays out the chosen lines and corrects every scale by
@@ -1502,14 +1545,25 @@ THREE",
         };
         // Wider type: the word gap tracking is not scaled twice.
         baked_matches(make(1.3));
-        // Narrower type: wrapping sees the unscaled width, which is wider than the box, so a baked
-        // line would wrap. That is refused, not returned wrong.
+        // Condensed type: box wrapping measures the unscaled width, which is wider than the box,
+        // so baked lines would wrap. It is refused before baking, naming the cause.
         let mut e = TextEngine::new();
         let (t, _) = solved(&mut e, make(0.8));
-        match bake(&mut e, &t, 72.0) {
-            Ok(b) => assert_same_look(&e.layout(&t, 72.0), &e.layout(&b, 72.0)),
-            Err(m) => assert!(m.contains("lines"), "{m}"),
+        let m = bake(&mut e, &t, 72.0).unwrap_err().to_string();
+        assert!(m.contains("condensed type (Horizontal Scale below 100%)"), "{m}");
+    }
+
+    #[test]
+    fn bake_reports_the_line_count_when_every_margin_fails() {
+        let mut e = TextEngine::new();
+        // A line 0.05 % wider than a wide box: the first margin leaves it wrapping, the second
+        // keeps the line count but moves the far glyphs more than half a pixel.
+        let (mut t, _) = solved(&mut e, fit_box(FOX, 12.0, 1500.0, 300.0));
+        if let Some(f) = t.fit.as_mut() {
+            f.lines.iter_mut().for_each(|l| l.scale *= 1.0005);
         }
+        let m = bake(&mut e, &t, 72.0).unwrap_err().to_string();
+        assert!(m.contains("lays out in"), "{m}");
     }
 
     #[test]
@@ -1520,8 +1574,8 @@ THREE",
         if let Some(f) = t.fit.as_mut() {
             f.lines = vec![FitLine { start: 0, scale: 1.0 }];
         }
-        let err = bake(&mut e, &t, 72.0).unwrap_err();
-        assert!(err.contains("line"), "{err}");
+        let err = bake(&mut e, &t, 72.0).unwrap_err().to_string();
+        assert!(err.contains("lays out in"), "{err}");
     }
 
     #[test]

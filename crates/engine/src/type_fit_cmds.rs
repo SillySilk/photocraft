@@ -14,6 +14,7 @@ const CONVERT: &str = "type.convertToDynamicText";
 const RELEASE: &str = "type.releaseDynamicText";
 const SET: &str = "type.setDynamicText";
 const NOT_FITTED: &str = "the type layer is not Dynamic Text";
+const CONDENSED: &str = "Release Dynamic Text can't keep condensed type (Horizontal Scale below 100%) yet; set it to 100% or more first";
 
 fn bad(cmd: &str, m: &str) -> EngineError {
     EngineError::BadParams { cmd: cmd.into(), msg: m.into() }
@@ -138,8 +139,10 @@ fn release(s: &mut Session, p: &Value) -> Result<Value> {
             t.fit = None;
         } else {
             let mut eng = photocraft_text::shared().lock().unwrap_or_else(|e| e.into_inner());
-            let baked = photocraft_text::fit::bake(&mut eng, t, doc.resolution_dpi)
-                .map_err(|m| bad(RELEASE, &format!("the fitted look cannot be kept as ordinary type: {m}")))?;
+            let baked = photocraft_text::fit::bake(&mut eng, t, doc.resolution_dpi).map_err(|e| match e {
+                photocraft_text::fit::BakeError::Condensed => bad(RELEASE, CONDENSED),
+                e => bad(RELEASE, &format!("the fitted look cannot be kept as ordinary type: {e}")),
+            })?;
             *t = baked;
         }
         Ok(())
