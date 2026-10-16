@@ -629,16 +629,22 @@ fn curves_on_grey_targets_ignore_the_document_colour_mode() {
 
 #[test]
 fn replace_color_localized_clusters_only_change_the_colour_near_the_sample() {
+    for depth in DEPTHS {
+        localized_clusters_only_change_the_colour_near_the_sample(depth);
+    }
+}
+
+fn localized_clusters_only_change_the_colour_near_the_sample(depth: u64) {
     // The same cream on the left (x < 8) and the right (x ≥ 40), grey between.
     let cream = [0.9, 0.88, 0.79, 1.0];
-    let mut s = session(8, "rgb");
+    let mut s = session(depth, "rgb");
     paint(&mut s, |x, _| if !(8..40).contains(&x) { cream } else { [0.5, 0.5, 0.5, 1.0] });
     let base = |s: &Session| (rgba(s, 3, 16), rgba(s, 44, 16), rgba(s, 20, 16));
     let (left, right, grey) = base(&s);
     let shift = json!({"color": "#e6e0c9", "fuzziness": 20, "hue": 180, "saturation": 60});
     // Without clusters the colour is replaced everywhere (unchanged behaviour).
     s.execute("image.adjustments.replaceColor", shift.clone()).unwrap();
-    assert!(changed(rgba(&s, 3, 16), left) > 0.05 && changed(rgba(&s, 44, 16), right) > 0.05);
+    assert!(changed(rgba(&s, 3, 16), left) > 0.05 && changed(rgba(&s, 44, 16), right) > 0.05, "{depth}-bit");
     s.execute("edit.undo", json!({})).unwrap();
     // Picked on the left with Range 50 % (24 px): only the left cream changes.
     let mut local = shift.clone();
@@ -646,15 +652,15 @@ fn replace_color_localized_clusters_only_change_the_colour_near_the_sample() {
     local["localized"] = json!(true);
     local["range"] = json!(50);
     s.execute("image.adjustments.replaceColor", local.clone()).unwrap();
-    assert!(changed(rgba(&s, 3, 16), left) > 0.05, "near the sample");
-    assert_eq!(rgba(&s, 44, 16), right, "the same colour far from the sample");
-    assert_eq!(rgba(&s, 20, 16), grey);
+    assert!(changed(rgba(&s, 3, 16), left) > 0.05, "{depth}-bit: near the sample");
+    assert_eq!(rgba(&s, 44, 16), right, "{depth}-bit: the same colour far from the sample");
+    assert_eq!(rgba(&s, 20, 16), grey, "{depth}-bit");
     s.execute("edit.undo", json!({})).unwrap();
     // Inside a selection that doesn't start at the origin the sample stays where it was picked.
     s.execute("select.rect", json!({"x": 1, "y": 4, "width": 46, "height": 24})).unwrap();
     s.execute("image.adjustments.replaceColor", local).unwrap();
-    assert!(changed(rgba(&s, 3, 16), left) > 0.05);
-    assert_eq!(rgba(&s, 44, 16), right);
+    assert!(changed(rgba(&s, 3, 16), left) > 0.05, "{depth}-bit");
+    assert_eq!(rgba(&s, 44, 16), right, "{depth}-bit");
     // Clusters need a place to be near.
     let err = s.execute("image.adjustments.replaceColor", json!({"localized": true})).unwrap_err();
     assert!(err.to_string().contains("points"), "{err}");
@@ -662,10 +668,15 @@ fn replace_color_localized_clusters_only_change_the_colour_near_the_sample() {
     assert!(err.to_string().contains("bad point"), "{err}");
 }
 
-/// 40×10 RGB: bright red, dark red, blue, white in four 10-px bands.
+/// 40×10 RGB at 8 bits: bright red, dark red, blue, white in four 10-px bands.
 fn red_shades_doc() -> Session {
+    red_shades_doc_at(8)
+}
+
+/// [`red_shades_doc`] at `depth` bits.
+fn red_shades_doc_at(depth: u64) -> Session {
     let mut s = Session::new();
-    s.execute("file.new", json!({"width": 40, "height": 10, "depth": 8, "mode": "rgb"})).unwrap();
+    s.execute("file.new", json!({"width": 40, "height": 10, "depth": depth, "mode": "rgb"})).unwrap();
     paint(&mut s, |x, _| match x / 10 {
         0 => [1.0, 0.0, 0.0, 1.0],
         1 => [180.0 / 255.0, 0.0, 0.0, 1.0],
@@ -679,10 +690,10 @@ fn history_len(s: &Session) -> usize {
     s.active().unwrap().history.past_len()
 }
 
-/// 40×10 RGB: bright red, mid red, dark red, white in four 10-px bands.
-fn three_reds_doc() -> Session {
+/// 40×10 RGB at `depth` bits: bright red, mid red, dark red, white in four 10-px bands.
+fn three_reds_doc(depth: u64) -> Session {
     let mut s = Session::new();
-    s.execute("file.new", json!({"width": 40, "height": 10, "depth": 8, "mode": "rgb"})).unwrap();
+    s.execute("file.new", json!({"width": 40, "height": 10, "depth": depth, "mode": "rgb"})).unwrap();
     paint(&mut s, |x, _| match x / 10 {
         0 => [1.0, 0.0, 0.0, 1.0],
         1 => [217.0 / 255.0, 0.0, 0.0, 1.0],
@@ -701,45 +712,51 @@ fn greens(s: &Session) -> [f32; 3] {
 fn replace_color_subtract_point_excludes_a_shade() {
     // Bright and dark red span the match; subtracting the mid red between them pulls the nearer
     // edge onto it, so one end drops out. Control: without the subtract all three shift.
-    let run = |extra: Value| {
-        let mut s = three_reds_doc();
-        let mut p = json!({"points": [[5, 5], [25, 5]], "fuzziness": 10, "hue": 120});
-        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        s.execute("image.adjustments.replaceColor", p).unwrap();
-        s
-    };
-    let control = greens(&run(json!({"order": ["+", "+"]})));
-    let sub = greens(&run(json!({"subtractPoints": [[15, 5]], "order": ["+", "+", "-"]})));
-    eprintln!("control {control:?} subtract {sub:?}");
-    assert!(control.iter().all(|g| *g > 0.5), "control shifts every shade: {control:?}");
-    assert!(sub[1] > 0.5, "the subtracted shade stays selected at the new edge: {sub:?}");
-    assert!(sub[0].min(sub[2]) < control[0].min(control[2]) - 0.3, "subtract drops one end: {sub:?} vs {control:?}");
-    assert_eq!(rgba(&run(json!({})), 35, 5), [1.0, 1.0, 1.0, 1.0], "white untouched");
+    for depth in DEPTHS {
+        let run = |extra: Value| {
+            let mut s = three_reds_doc(depth);
+            let mut p = json!({"points": [[5, 5], [25, 5]], "fuzziness": 10, "hue": 120});
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            s.execute("image.adjustments.replaceColor", p).unwrap();
+            s
+        };
+        let control = greens(&run(json!({"order": ["+", "+"]})));
+        let sub = greens(&run(json!({"subtractPoints": [[15, 5]], "order": ["+", "+", "-"]})));
+        eprintln!("control {control:?} subtract {sub:?}");
+        assert!(control.iter().all(|g| *g > 0.5), "{depth}-bit: control shifts every shade: {control:?}");
+        assert!(sub[1] > 0.5, "{depth}-bit: the subtracted shade stays selected at the new edge: {sub:?}");
+        assert!(sub[0].min(sub[2]) < control[0].min(control[2]) - 0.3, "{depth}-bit: subtract drops one end: {sub:?} vs {control:?}");
+        assert_eq!(rgba(&run(json!({})), 35, 5), [1.0, 1.0, 1.0, 1.0], "{depth}-bit: white untouched");
+    }
 }
 
 #[test]
 fn subtract_before_sample_narrows_from_colour() {
     // No eyedropper points: the colours span the match and the subtract narrows it.
-    let run = |extra: Value| {
-        let mut s = three_reds_doc();
-        let mut p = json!({"colors": ["#ff0000", "#b40000"], "fuzziness": 10, "hue": 120});
-        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        s.execute("image.adjustments.replaceColor", p).unwrap();
-        greens(&s)
-    };
-    let control = run(json!({}));
-    let sub = run(json!({"subtractPoints": [[15, 5]]}));
-    eprintln!("control {control:?} subtract {sub:?}");
-    assert!(control.iter().all(|g| *g > 0.5), "{control:?}");
-    assert!(sub[0].min(sub[2]) < control[0].min(control[2]) - 0.3, "subtract narrows: {sub:?} vs {control:?}");
+    for depth in DEPTHS {
+        let run = |extra: Value| {
+            let mut s = three_reds_doc(depth);
+            let mut p = json!({"colors": ["#ff0000", "#b40000"], "fuzziness": 10, "hue": 120});
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            s.execute("image.adjustments.replaceColor", p).unwrap();
+            greens(&s)
+        };
+        let control = run(json!({}));
+        let sub = run(json!({"subtractPoints": [[15, 5]]}));
+        eprintln!("control {control:?} subtract {sub:?}");
+        assert!(control.iter().all(|g| *g > 0.5), "{depth}-bit: {control:?}");
+        assert!(sub[0].min(sub[2]) < control[0].min(control[2]) - 0.3, "{depth}-bit: subtract narrows: {sub:?} vs {control:?}");
+    }
 }
 
 #[test]
 fn replace_color_still_takes_a_plain_colour() {
-    let mut s = red_shades_doc();
-    s.execute("image.adjustments.replaceColor", json!({"color": "#0000ff", "fuzziness": 0, "hue": 180})).unwrap();
-    assert!(rgba(&s, 25, 5)[2] < 0.5, "blue shifted");
-    assert_eq!(rgba(&s, 5, 5), [1.0, 0.0, 0.0, 1.0]);
+    for depth in DEPTHS {
+        let mut s = red_shades_doc_at(depth);
+        s.execute("image.adjustments.replaceColor", json!({"color": "#0000ff", "fuzziness": 0, "hue": 180})).unwrap();
+        assert!(rgba(&s, 25, 5)[2] < 0.5, "{depth}-bit: blue shifted");
+        assert_eq!(rgba(&s, 5, 5), [1.0, 0.0, 0.0, 1.0], "{depth}-bit");
+    }
 }
 
 #[test]

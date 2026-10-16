@@ -53,23 +53,6 @@ pub(crate) fn params(f: &Map<String, Value>) -> Value {
     Value::Object(p)
 }
 
-/// The `select.colorRange` params that match what Replace Color changes: the thumbnail asks
-/// Color Range's own preview for this mask. Same samples and Fuzziness as the command (which clamps
-/// Fuzziness to 0..=200 and has no Sample All Layers, so it reads the merged composite, R2);
-/// Localized Color Clusters and Range only come with samples (R1), via `params`.
-pub(crate) fn range_params(f: &Map<String, Value>) -> Value {
-    let src = params(f);
-    let mut p = Map::new();
-    p.insert("select".into(), json!("sampledColors"));
-    for k in ["color", "points", "subtractPoints", "order", "localized", "range"] {
-        if let Some(v) = src.get(k) {
-            p.insert(k.into(), v.clone());
-        }
-    }
-    p.insert("fuzziness".into(), json!(num(f, "fuzziness", 40.0).clamp(0.0, 200.0)));
-    Value::Object(p)
-}
-
 /// Whether the top dialog is Replace Color: the canvas is its eyedropper from the moment it opens.
 pub(crate) fn sampling_top(app: &PhotocraftApp) -> bool {
     app.ui.dialogs.last().is_some_and(|d| owns(&d.fields))
@@ -101,12 +84,13 @@ fn pick_fields(app: &mut PhotocraftApp, f: &mut Map<String, Value>, at: [f64; 2]
     }
     let tool = crate::color_range_ui::tool_of(f, mods).to_string();
     crate::color_range_ui::pick(app, f, at, mods, "order");
-    // From colour follows the first sample (the point's own colour keeps the Lab box unchanged).
+    // A plain sample sets From colour to the sampled pixel (its own colour keeps the Lab box
+    // unchanged). Add and subtract only reshape the match: they never replace a From colour, which
+    // may have been chosen in its Color Picker.
     let pts = f.get("points").and_then(Value::as_array).cloned().unwrap_or_default();
     let first = pts.first().and_then(|p| Some((p.get(0)?.as_f64()?, p.get(1)?.as_f64()?)));
     if let Some((x, y)) = first
-        && tool != "subtract"
-        && (tool == "sample" || pts.len() == 1)
+        && tool == "sample"
         && let Some(rgb) = crate::canvas::composite_color(app, x, y)
     {
         f.insert("color".into(), json!(crate::color_picker_ui::hex(rgb)));
@@ -193,7 +177,7 @@ fn thumbnail(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Val
     let swap = ui.input(|i| i.modifiers.command || (!cfg!(target_os = "macos") && i.modifiers.ctrl));
     let (frame, resp) = ui.allocate_exact_size(THUMB, egui::Sense::click_and_drag());
     ui.painter().rect_filled(frame, 0.0, t.canvas);
-    let shown = mask_thumbnail(app, ui.ctx(), Slot::ReplaceColor, &range_params(f), (view == "image") ^ swap);
+    let shown = mask_thumbnail(app, ui.ctx(), Slot::ReplaceColor, &params(f), (view == "image") ^ swap);
     let doc_size = app.session.active().map(|st| [f64::from(st.doc.size.width.max(1)), f64::from(st.doc.size.height.max(1))]);
     if let (Some((tex, [w, h])), Some([dw, dh])) = (shown, doc_size) {
         let scale = (THUMB.x / w.max(1) as f32).min(THUMB.y / h.max(1) as f32);
@@ -415,40 +399,46 @@ mod tests {
     }
 
     #[test]
-    fn range_params_translate_samples() {
-        let mut f = Map::new();
-        f.insert("__filter".into(), json!(true));
-        f.insert("__command".into(), json!("image.adjustments.replaceColor"));
-        f.insert("color".into(), json!("#ff0000"));
-        f.insert("fuzziness".into(), json!(25));
-        f.insert("points".into(), json!([[1.0, 2.0]]));
-        f.insert("subtractPoints".into(), json!([]));
-        f.insert("order".into(), json!(["+"]));
-        f.insert("localized".into(), json!(true));
-        f.insert("range".into(), json!(40));
-        f.insert("hue".into(), json!(90));
-        let p = range_params(&f);
-        assert_eq!(p["select"], json!("sampledColors"));
-        assert_eq!(p["points"], json!([[1.0, 2.0]]));
-        assert_eq!(p["localized"], json!(true));
-        assert!(p.get("hue").is_none());
-        // R1: no samples, no localized / range.
-        f.insert("points".into(), json!([]));
-        f.insert("order".into(), json!([]));
-        let p = range_params(&f);
-        assert!(p.get("localized").is_none() && p.get("range").is_none() && p.get("points").is_none(), "{p}");
-    }
-
-    #[test]
     fn thumbnail_mask_whites_out_sampled_red_only() {
         let mut app = app_with_doc();
         let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
         pick_top(&mut app, [5.0, 5.0], egui::Modifiers::NONE);
-        let p = range_params(&app.ui.dialog_mut(id).unwrap().fields);
-        let mask = crate::color_range_ui::mask_values(&app, &p).unwrap();
+        let p = params(&app.ui.dialog_mut(id).unwrap().fields);
+        let mask = crate::color_range_ui::mask_values(&app, crate::color_range_ui::Slot::ReplaceColor, &p).unwrap();
         let (w, _h) = mask.1;
         assert!(mask.0[5 * w + 5] > 0.9);
         assert!(mask.0[5 * w + 25] < 0.1);
+    }
+
+    /// OK changes only the active layer, so the thumbnail judges that layer's pixels: red under a
+    /// blue layer above is still changed, and shown as changed.
+    #[test]
+    fn thumbnail_judges_the_active_layer_ok_changes() {
+        use photocraft_doc::Layer;
+        let mut doc = Document::with_background("two layers", Size::new(40, 30), ColorMode::Rgb, SampleType::U8, Color::rgb(1.0, 0.0, 0.0));
+        let mut top = Layer::raster("blue", doc.pixel_format());
+        top.surface_mut().unwrap().fill_rect(GRect::new(0, 0, 20, 30), &[0.0, 0.0, 1.0, 1.0]);
+        doc.layers.push(top);
+        let bottom = doc.layers[0].id;
+        let mut s = photocraft_engine::Session::new();
+        s.add_document(doc, None);
+        s.select_layer(bottom).unwrap();
+        let mut app = PhotocraftApp::new(s, crate::Services::default());
+        let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
+        {
+            let f = &mut app.ui.dialog_mut(id).unwrap().fields;
+            f.insert("color".into(), json!("#ff0000"));
+            f.insert("fuzziness".into(), json!(10));
+            f.insert("hue".into(), json!(120));
+        }
+        let (mask, (w, _)) = crate::color_range_ui::mask_values(&app, crate::color_range_ui::Slot::ReplaceColor, &params(&fields(&app))).unwrap();
+        crate::dialogs::confirm(&mut app, id).unwrap();
+        let layer = app.session.active().unwrap().doc.layer(bottom).unwrap().surface().unwrap().clone();
+        for x in [5, 30] {
+            let changed = layer.rgba(x, 10)[1] > 0.5;
+            assert!(changed, "OK recolours the active layer's red at x = {x}");
+            assert!(mask[10 * w + x as usize] > 0.9, "the thumbnail shows x = {x} as changed: {}", mask[10 * w + x as usize]);
+        }
     }
 
     /// Both dialogs share one cache type but not one cache: drawing one must not evict the other.
@@ -501,6 +491,32 @@ mod tests {
         assert!(!changed(&shown, 0, &reduced, 0), "preview must leave the red background alone");
     }
 
+    /// Localized Color Clusters on a reduced preview of a layer whose content starts away from the
+    /// origin: the clusters are centred where the sample was picked, as OK centres them.
+    #[test]
+    fn reduced_localized_preview_matches_ok_on_an_offset_layer() {
+        use photocraft_doc::Layer;
+        let mut doc = Document::with_background("offset", Size::new(400, 40), ColorMode::Rgb, SampleType::U8, Color::WHITE);
+        let mut layer = Layer::raster("red", doc.pixel_format());
+        let surface = layer.surface_mut().unwrap();
+        surface.fill_rect(GRect::new(200, 0, 300, 40), &[1.0, 0.0, 0.0, 1.0]);
+        surface.fill_rect(GRect::new(360, 0, 400, 40), &[1.0, 0.0, 0.0, 1.0]);
+        let id = layer.id;
+        doc.layers.push(layer);
+        let p = json!({"color": "#ff0000", "points": [[210, 20]], "localized": true, "range": 25, "fuzziness": 20, "hue": 120});
+        let shown = crate::filter_dialog::preview_document(&doc, Some(id), COMMAND, &p, 2).unwrap();
+        let mut s = photocraft_engine::Session::new();
+        s.add_document(doc, None);
+        s.select_layer(id).unwrap();
+        s.execute(COMMAND, p).unwrap();
+        let ok = crate::proxy::proxy_document(&s.active().unwrap().doc, 2);
+        let row = |d: &Document| d.layer(id).unwrap().surface().unwrap().read_region(GRect::new(100, 10, 200, 11));
+        let (ok, shown) = (row(&ok), row(&shown));
+        let worst = ok.iter().zip(&shown).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(worst < 0.03, "preview differs from OK by {worst} across the matched cluster");
+        assert!(ok[4 * 10 + 1] > 0.8, "OK recolours red near the sample to green");
+    }
+
     #[test]
     fn result_swatch_tracks_sliders() {
         let mut app = app_with_doc();
@@ -543,6 +559,22 @@ mod tests {
         assert_eq!(f["hue"].as_f64(), Some(120.0));
         assert_eq!(f["points"], json!([[25.0, 5.0]]), "an eyedropper sample is not cleared");
         assert_ne!(f["__result"], json!("#00ff00"));
+    }
+
+    /// Add to Sample grows the match; it never replaces a From colour chosen in its Color Picker.
+    #[test]
+    fn shift_add_keeps_a_from_colour_picked_in_the_color_picker() {
+        let mut app = app_with_doc();
+        let id = crate::filter_dialog::open(&mut app, COMMAND).unwrap();
+        {
+            let f = &mut app.ui.dialog_mut(id).unwrap().fields;
+            f.insert("color".into(), json!("#00ff00"));
+            sync_result(f);
+        }
+        assert!(pick_top(&mut app, [5.0, 5.0], egui::Modifiers::SHIFT));
+        let f = fields(&app);
+        assert_eq!(f["points"], json!([[5.0, 5.0]]), "the added sample is kept");
+        assert_eq!(f["color"], json!("#00ff00"), "Shift-click must not overwrite the picked From colour");
     }
 
     #[test]

@@ -326,6 +326,19 @@ fn proxy_mask(app: &PhotocraftApp, proxy: &Document, k: u32, params: &Value) -> 
     Ok(photocraft_algo::selection::mask_from_surface(d.doc.selection.as_ref(), area))
 }
 
+/// The thumbnail mask of `slot` for `params` on `proxy`.
+fn slot_mask(app: &PhotocraftApp, slot: Slot, proxy: &Document, k: u32, params: &Value) -> Result<Vec<f32>, String> {
+    match slot {
+        Slot::ColorRange => proxy_mask(app, proxy, k, params),
+        // `params` are Replace Color's own: what OK changes, on the layer (or channel) it edits.
+        Slot::ReplaceColor => {
+            let mut mask = photocraft_engine::adjust_cmds::replace_color_coverage(&app.session, proxy, params, k).map_err(|e| e.to_string())?;
+            scope_preview(proxy, params, &mut mask);
+            Ok(mask)
+        }
+    }
+}
+
 /// Record why the preview failed (logged once per new reason), or clear it.
 fn report(app: &mut PhotocraftApp, slot: Slot, error: Option<String>) {
     let Some(p) = cache_mut(app, slot) else { return };
@@ -344,10 +357,11 @@ fn preview(app: &mut PhotocraftApp, ctx: &egui::Context, f: &Map<String, Value>)
     thumbnail(app, ctx, Slot::ColorRange, &params(f), image_view)
 }
 
-/// The Selection / Image thumbnail of a Color Range style query: the mask `params` (the
-/// `select.colorRange` params) would select, as a grey texture, or with `image` the image itself,
-/// both on the cached proxy of the active document. Replace Color draws the same thumbnail from
-/// its own `slot`. Returns the texture and its size in proxy pixels.
+/// The Selection / Image thumbnail of a Color Range style query: the mask `params` would select,
+/// as a grey texture, or with `image` the image itself, both on the cached proxy of the active
+/// document. `params` are the `select.colorRange` params for [`Slot::ColorRange`] and the
+/// `image.adjustments.replaceColor` params for [`Slot::ReplaceColor`] (the mask is then what OK
+/// changes on the layer or channel it edits). Returns the texture and its size in proxy pixels.
 pub(crate) fn mask_thumbnail(app: &mut PhotocraftApp, ctx: &egui::Context, slot: Slot, params: &Value, image: bool) -> Option<(egui::TextureId, [usize; 2])> {
     thumbnail(app, ctx, slot, params, image).map(|(id, size, _)| (id, size))
 }
@@ -355,11 +369,11 @@ pub(crate) fn mask_thumbnail(app: &mut PhotocraftApp, ctx: &egui::Context, slot:
 /// The proxy mask `params` would give on the active document, row-major 0..=1, and its size: the
 /// texture-free core of [`mask_thumbnail`] for tests (the proxy is the document itself up to `PREVIEW`).
 #[cfg(test)]
-pub(crate) fn mask_values(app: &PhotocraftApp, params: &Value) -> Option<(Vec<f32>, (usize, usize))> {
+pub(crate) fn mask_values(app: &PhotocraftApp, slot: Slot, params: &Value) -> Option<(Vec<f32>, (usize, usize))> {
     let doc = &app.session.active()?.doc;
     let k = doc.size.width.max(doc.size.height).max(1).div_ceil(PREVIEW).max(1);
     let proxy = crate::proxy::proxy_document(doc, k);
-    let mask = proxy_mask(app, &proxy, k, params).ok()?;
+    let mask = slot_mask(app, slot, &proxy, k, params).ok()?;
     Some((mask, (proxy.size.width as usize, proxy.size.height as usize)))
 }
 
@@ -417,7 +431,7 @@ fn thumbnail(app: &mut PhotocraftApp, ctx: &egui::Context, slot: Slot, params: &
         return cache(app, slot)?.image.as_ref().map(|t| (t.id(), [w, h], k));
     }
     if cache(app, slot).is_some_and(|p| p.mask_key != key || p.mask.is_none()) {
-        let mask = match proxy_mask(app, &proxy, k, params) {
+        let mask = match slot_mask(app, slot, &proxy, k, params) {
             Ok(m) => {
                 report(app, slot, None);
                 m

@@ -352,8 +352,11 @@ fn replace_color_samples(s: &Session, p: &Value) -> Result<crate::selection_cmds
 fn replace_color_apply(s: &mut Session, p: &Value, samples: &crate::selection_cmds::ColorRangeSamples, k: u32) -> Result<Value> {
     let (h, sat, l) = (num(p, "hue", 0.0).clamp(-180.0, 180.0), num(p, "saturation", 0.0).clamp(-100.0, 100.0), num(p, "lightness", 0.0).clamp(-100.0, 100.0));
     let area = s.active().ok_or(EngineError::NoDocument)?.doc.bounds();
+    // `coverage` takes its origin in original document pixels; on a copy reduced by `k`, the
+    // edited rectangle's offset is `k` times larger there.
+    let k = k.max(1) as f32;
     rgba_edit(s, "Replace Color", p, |px, r| {
-        let mask = samples.coverage(px, r.width() as usize, k as f32, [(r.x0 - area.x0) as f32, (r.y0 - area.y0) as f32]);
+        let mask = samples.coverage(px, r.width() as usize, k, [(r.x0 - area.x0) as f32 * k, (r.y0 - area.y0) as f32 * k]);
         tone::replace_color_masked(px, &mask, h, sat, l);
     })
 }
@@ -369,6 +372,21 @@ pub fn replace_color_reduced(s: &mut Session, original: &photocraft_doc::Documen
     source.add_document(original.clone(), None);
     let samples = replace_color_samples(&source, p)?;
     replace_color_apply(s, p, &samples, k.max(1))
+}
+
+/// How much Replace Color with `p` changes each pixel of `reduced` (row-major over its bounds,
+/// 0..=1): the pixels OK edits on `s`'s active document (the active layer, or the targeted mask or
+/// channel), here on `reduced`, a copy of it reduced by `k`, judged by OK's own samples: the
+/// dialog's Selection thumbnail. The selection is not applied; OK limits the change to it.
+pub fn replace_color_coverage(s: &Session, reduced: &Document, p: &Value, k: u32) -> Result<Vec<f32>> {
+    let p = crate::channel_cmds::inject_target(s, REPLACE_COLOR, p.clone());
+    let samples = replace_color_samples(s, &p)?;
+    let layer = crate::commands::layer_param(s, &Value::Null).ok();
+    let surf = crate::channel_cmds::read_target_surface(reduced, layer, &p)?;
+    let area = reduced.bounds();
+    let mut px = vec![[0.0f32; 4]; area.width() as usize * area.height() as usize];
+    surf.read_rgba_into(area, &mut px);
+    Ok(samples.coverage(&px, area.width() as usize, k.max(1) as f32, [0.0, 0.0]))
 }
 
 /// Straight RGBA pixels and an optional coverage mask for a document's layer (or its composite).
@@ -483,7 +501,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "image.adjustments.replaceColor",
             "Replace Color…",
             ["Image", "Adjustments"],
-            r##"{"localized":bool=false,"color":color,"fuzziness":0..200=40,"range":0..100=100,"hue":-180..180=0,"saturation":-100..100=0,"lightness":-100..100=0,"points":[[x,y],…]?,"subtractPoints":[[x,y],…]?,"order":["+"|"-",…]?} (color: "#rrggbb", default the foreground colour; "points"/"subtractPoints": eyedropper samples read from the merged image at those document pixels, "order": the click order as in select.colorRange; Localized Color Clusters needs "points", "range" % of the longer side)"##,
+            r##"{"localized":bool=false,"color":color,"colors":["#rrggbb",…]?,"fuzziness":0..200=40,"range":0..100=100,"hue":-180..180=0,"saturation":-100..100=0,"lightness":-100..100=0,"points":[[x,y],…]?,"subtractPoints":[[x,y],…]?,"order":["+"|"-",…]?,"sampleAllLayers":bool=true} (color: "#rrggbb", default the foreground colour when neither "color", "colors" nor "points" is given; "colors": more fixed colours to match; the match spans "color", "colors" and "points" together; "points"/"subtractPoints": eyedropper samples at those document pixels, read from the merged image, or from the active layer with "sampleAllLayers": false; "order": the click order as in select.colorRange; Localized Color Clusters needs "points", "range" % of the longer side)"##,
             has_pixels,
             replace_color
         ),
