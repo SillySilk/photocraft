@@ -2416,3 +2416,16 @@ mod dynamic_text_ui {
         assert_eq!(h.state().session.active().unwrap().history.entries().len(), before + 1);
     }
 }
+
+#[test]
+fn hovering_a_drawn_rectangle_shows_the_area_type_target() {
+    use crate::canvas::{ToolEvent, tool_event};
+    // A rectangle drawn with the Rectangle tool, then the Type tool hovering inside it (#218).
+    let mut app = new_app();
+    app.ui.tool = crate::state::Tool::Rectangle;
+    tool_event(&mut app, ToolEvent::Down { x: 200.0, y: 200.0, pressure: 1.0 }, Modifiers::NONE);
+    tool_event(&mut app, ToolEvent::Move { x: 500.0, y: 400.0, pressure: 1.0 }, Modifiers::NONE);
+    tool_event(&mut app, ToolEvent::Up { x: 500.0, y: 400.0 }, Modifiers::NONE);
+    app.ui.tool = crate::state::Tool::Type;
+    assert!(matches!(crate::type_tool::hover_path_target(&mut app, 350.0, 300.0, false), Some(PathClick::Area { shape: Some(_) })));
+}
