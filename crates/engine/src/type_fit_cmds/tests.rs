@@ -573,3 +573,26 @@ fn release_and_psd_export_name_condensed_type() {
     assert_eq!(dt.len(), 1, "{:?}", r.warnings);
     assert!(dt[0].contains(&format!("\"{name}\"")) && dt[0].contains("condensed type (Horizontal Scale below 100%)"), "{dt:?}");
 }
+
+#[test]
+fn typing_after_release_at_a_former_line_end_takes_plain_tracking() {
+    let (mut s, id) = session_with_box_text("The quick brown fox jumps over the lazy dog", 12.0, [0.0, 0.0, 300.0, 300.0]);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    s.execute("type.setDynamicText", json!({"layer": id.0, "wordGap": 60})).unwrap();
+    s.execute("type.releaseDynamicText", json!({"layer": id.0})).unwrap();
+    let released = text(&s, id);
+    // The word gap became tracking on the spaces inside lines, so plain runs are not a given.
+    assert!(released.char_runs().iter().any(|r| r.style.tracking != 0.0), "{:?}", released.char_runs());
+    let brk = released.text.find('\u{3}').expect("a baked line break");
+    let at = released.text[..brk].chars().count();
+    s.execute("type.insertText", json!({"layer": id.0, "text": "x", "at": at})).unwrap();
+    let typed = text(&s, id);
+    assert_eq!(typed.text, format!("{}x{}", &released.text[..brk], &released.text[brk..]));
+    let mut end = 0;
+    let run = typed.char_runs().into_iter().find(|r| {
+        end += r.len;
+        end > brk
+    });
+    let run = run.expect("a run covers the typed character");
+    assert_eq!(run.style.tracking, 0.0, "the typed character takes the word's plain tracking");
+}

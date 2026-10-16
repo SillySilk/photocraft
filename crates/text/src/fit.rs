@@ -1512,7 +1512,6 @@ THREE",
 
     #[test]
     fn bake_replaces_line_ending_spaces_with_the_break() {
-        let mut e = TextEngine::new();
         let baked = baked_matches(fit_box(FOX, 12.0, 400.0, 300.0));
         assert!(!baked.text.contains(" \u{3}"), "{:?}", baked.text);
         assert!(
@@ -1520,21 +1519,7 @@ THREE",
             "plain runs: {:?}",
             baked.char_runs().iter().map(|r| r.style.tracking).collect::<Vec<_>>()
         );
-        // Typing at a former line end takes the run's plain tracking.
-        let at = baked.text.find('\u{3}').unwrap();
-        let mut typed = baked.clone();
-        typed.text.insert(at, 'x');
-        let _ = e.layout(&typed, 72.0);
-        let run = baked
-            .char_runs()
-            .iter()
-            .scan(0, |a, r| {
-                *a += r.len;
-                Some((*a, r.style.tracking))
-            })
-            .find(|(end, _)| *end > at)
-            .map(|(_, t)| t);
-        assert_eq!(run, Some(0.0));
+        // Typing at a former line end after a release: type_fit_cmds' tests type there.
     }
 
     #[test]
