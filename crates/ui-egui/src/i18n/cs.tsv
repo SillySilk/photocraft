@@ -3797,3 +3797,9 @@ navigator	Zoom	Zvětšení
 	There are too many sets: delete one first.	Sad je příliš mnoho: nejprve jednu smažte.
 	set name	název sady
 	{set} (modified)	{set} (změněno)
+	Dynamic Text	Dynamický text
+	Convert to Dynamic Text	Převést na dynamický text
+	Release Dynamic Text	Uvolnit dynamický text
+	Size is set by Dynamic Text	Velikost určuje dynamický text
+	Word Gap	Mezera mezi slovy
+	Line Gap	Mezera mezi řádky

@@ -20,6 +20,7 @@ pub mod area;
 pub mod cjk;
 pub mod craft_fonts;
 pub mod engine_data;
+pub mod fit;
 pub mod fonts;
 pub mod glyphs;
 pub mod layout;

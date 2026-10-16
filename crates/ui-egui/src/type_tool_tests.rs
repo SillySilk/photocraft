@@ -2206,3 +2206,106 @@ fn hidden_target_path_is_not_a_click_target() {
     app.ui.view.extras = false;
     assert!(path_target(&app, 500.0, 400.0).is_none(), "Extras off");
 }
+
+/// Dynamic Text in the options bar and Properties: the toggle, the greyed-out size fields and
+/// the gap sliders.
+mod dynamic_text_ui {
+    use super::*;
+    use egui::accesskit::Role;
+    use egui_kittest::kittest::NodeT;
+
+    fn app_with_box_text(words: &str, size: f32) -> (PhotocraftApp, LayerId) {
+        let mut app = new_app();
+        let r = app.run("type.create", json!({"x": 0, "y": 0, "text": words, "size": size, "color": "#000000", "box": [100, 100, 400, 200]})).unwrap();
+        (app, LayerId(r["layer"].as_u64().unwrap()))
+    }
+
+    fn bar(app: PhotocraftApp, properties: bool) -> Harness<'static, PhotocraftApp> {
+        let mut h = Harness::builder().with_size(vec2(1100.0, 800.0)).build_ui_state(
+            move |ui, app: &mut PhotocraftApp| {
+                if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    return;
+                }
+                if properties {
+                    ui.set_width(340.0);
+                    super::super::type_properties(app, ui);
+                } else {
+                    ui.horizontal(|ui| super::super::options_bar(app, ui));
+                }
+            },
+            app,
+        );
+        PhotocraftApp::setup_context(&h.ctx, Default::default());
+        h.run_steps(4);
+        h
+    }
+
+    fn fitted(h: &Harness<'static, PhotocraftApp>, id: LayerId) -> bool {
+        text(h.state(), id).fit.is_some()
+    }
+
+    #[test]
+    fn toggle_converts_and_releases() {
+        let (app, id) = app_with_box_text("Hello", 12.0);
+        let mut h = bar(app, false);
+        h.get_by_label("Dynamic Text").click();
+        h.run_steps(3);
+        assert!(fitted(&h, id));
+        let size = text(h.state(), id).size_pt;
+        assert!(size > 12.0, "fills the box: {size}");
+        h.get_by_label("Dynamic Text").click();
+        h.run_steps(3);
+        assert!(!fitted(&h, id));
+        assert_eq!(text(h.state(), id).size_pt, size, "release keeps the fitted size");
+    }
+
+    #[test]
+    fn size_field_disabled_only_while_fitted() {
+        let (app, id) = app_with_box_text("Hello", 12.0);
+        let mut h = bar(app, false);
+        let disabled = |h: &Harness<'static, PhotocraftApp>| h.get_all_by_role(Role::SpinButton).next().expect("size field").accesskit_node().is_disabled();
+        assert!(!disabled(&h));
+        h.state_mut().run("type.convertToDynamicText", json!({})).unwrap();
+        h.run_steps(3);
+        assert!(fitted(&h, id) && disabled(&h));
+        h.state_mut().run("type.releaseDynamicText", json!({})).unwrap();
+        h.run_steps(3);
+        assert!(!disabled(&h));
+    }
+
+    #[test]
+    fn properties_grey_size_and_leading_and_show_gap_sliders_only_while_fitted() {
+        let (app, _) = app_with_box_text("Hello", 12.0);
+        let mut h = bar(app, true);
+        assert!(h.query_by_label("Line Gap").is_none() && h.query_by_label("Word Gap").is_none());
+        assert!(!h.get_by_label("Font size").accesskit_node().is_disabled());
+        h.state_mut().run("type.convertToDynamicText", json!({})).unwrap();
+        h.run_steps(3);
+        assert!(h.query_by_label("Line Gap").is_some() && h.query_by_label("Word Gap").is_some());
+        assert!(h.get_by_label("Font size").accesskit_node().is_disabled());
+        assert!(h.get_by_label_contains("Leading").accesskit_node().is_disabled());
+        h.state_mut().run("type.releaseDynamicText", json!({})).unwrap();
+        h.run_steps(3);
+        assert!(h.query_by_label("Line Gap").is_none());
+        assert!(!h.get_by_label("Font size").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn gap_field_edits_run_set_dynamic_text() {
+        let (mut app, id) = app_with_box_text("Hello there friend", 12.0);
+        app.run("type.convertToDynamicText", json!({})).unwrap();
+        let mut h = bar(app, true);
+        let before = h.state().session.active().unwrap().history.entries().len();
+        // The Line Gap row's field is the spin button level with its label.
+        let y = h.get_by_label("Line Gap").rect().center().y;
+        let field = h.get_all_by_role(Role::SpinButton).min_by(|a, b| (a.rect().center().y - y).abs().total_cmp(&(b.rect().center().y - y).abs())).unwrap();
+        field.click();
+        h.run();
+        h.key_press_modifiers(Modifiers::COMMAND, egui::Key::A);
+        h.event(egui::Event::Text("50".into()));
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(text(h.state(), id).fit.unwrap().line_gap, 50.0);
+        assert_eq!(h.state().session.active().unwrap().history.entries().len(), before + 1);
+    }
+}

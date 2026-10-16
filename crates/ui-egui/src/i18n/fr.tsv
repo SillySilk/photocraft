@@ -3194,3 +3194,9 @@ curves	Smooth	Lisser
 	set name	nom du jeu
 	{set} (modified)	{set} (modifié)
 	Random	Aléatoire
+	Dynamic Text	Texte dynamique
+	Convert to Dynamic Text	Convertir en texte dynamique
+	Release Dynamic Text	Libérer le texte dynamique
+	Size is set by Dynamic Text	La taille est définie par le texte dynamique
+	Word Gap	Espace entre les mots
+	Line Gap	Espace entre les lignes

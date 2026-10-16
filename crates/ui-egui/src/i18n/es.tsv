@@ -4151,3 +4151,9 @@ navigator	Zoom	Zoom
 	There are too many sets: delete one first.	Hay demasiados conjuntos: elimine uno primero.
 	set name	nombre del conjunto
 	{set} (modified)	{set} (modificado)
+	Dynamic Text	Texto dinámico
+	Convert to Dynamic Text	Convertir en texto dinámico
+	Release Dynamic Text	Liberar texto dinámico
+	Size is set by Dynamic Text	El tamaño lo define el texto dinámico
+	Word Gap	Espacio entre palabras
+	Line Gap	Espacio entre líneas

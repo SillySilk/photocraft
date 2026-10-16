@@ -532,10 +532,15 @@ pub fn replace_text(t: &mut TextLayer, a: usize, b: usize, new: &str) {
     t.sync_summary();
 }
 
-/// Re-renders the layer's pixels and regenerates its PSD `TySh` data.
+/// Re-renders the layer's pixels and regenerates its PSD `TySh` data. Dynamic Text is refitted
+/// first, so every edit that ends here (typing, styles, box resize, path changes, font swaps)
+/// keeps the text filling its box; a layer without fit returns from the solver at once.
 pub fn refresh(doc: &Document, t: &mut TextLayer) {
     let dpi = doc.resolution_dpi;
     let mut eng = photocraft_text::shared().lock().unwrap_or_else(|e| e.into_inner());
+    if t.fit.is_some() && crate::type_fit_cmds::fit_refusal(t).is_none() {
+        photocraft_text::fit::refit(&mut eng, t, dpi);
+    }
     let (layout, r) = eng.render(t, dpi, doc.pixel_format());
     t.cache = Some(r.surface);
     t.psd_raw = Some(Arc::new(photocraft_text::psd::build_tysh(t, dpi, layout.bounds())));
@@ -952,6 +957,9 @@ pub fn specs() -> Vec<CommandSpec> {
                 check_kerning(p).map_err(|m| bad("type.setStyle", m))?;
                 check_steps(p).map_err(|m| bad("type.setStyle", m))?;
                 let ids = with_text_targets(s, p, "Set Type Style", |t, (a, b)| {
+                    if t.fit.is_some() && p.get("direction").and_then(Value::as_str) == Some("rtl") {
+                        return Err(bad("type.setStyle", "Release Dynamic Text first"));
+                    }
                     let props = shown_style_params(t, p)?;
                     check_size_tracking(&props).map_err(|m| bad("type.setStyle", m))?;
                     let mut probe = CharStyle::default();

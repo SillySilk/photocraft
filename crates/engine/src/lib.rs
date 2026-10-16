@@ -119,6 +119,7 @@ pub mod type_area_cmds;
 pub mod type_caret_cmds;
 pub mod type_cmds;
 pub mod type_extra_cmds;
+pub mod type_fit_cmds;
 pub mod type_mask_cmds;
 pub mod type_spell_cmds;
 pub mod type_styles_cmds;
@@ -796,7 +797,9 @@ impl Session {
 
     /// Re-renders the pixels of type layers whose font arrived after they were drawn (the web
     /// build fetches served fonts on demand, `photocraft_text::served`). The layers' model is
-    /// unchanged, so this is no history step and leaves a clean document clean. Unknown documents
+    /// unchanged except for Dynamic Text: a fitted layer is refitted with the new font, which can
+    /// rewrite its sizes. That is intended, because the sizes are derived from the box. This is no
+    /// history step and leaves a clean document clean. Unknown documents
     /// and layers are skipped. A document a background job is computing from must not move under
     /// it: its layers are returned, to try again later.
     pub fn refresh_type_layers(&mut self, layers: &[(photocraft_doc::DocId, LayerId)]) -> Vec<(photocraft_doc::DocId, LayerId)> {

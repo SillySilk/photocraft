@@ -3949,3 +3949,9 @@ curves	Smooth	Vloeiend maken
 	There are too many sets: delete one first.	Er zijn te veel sets: verwijder er eerst een.
 	set name	naam van de set
 	{set} (modified)	{set} (gewijzigd)
+	Dynamic Text	Dynamische tekst
+	Convert to Dynamic Text	Converteren naar dynamische tekst
+	Release Dynamic Text	Dynamische tekst loslaten
+	Size is set by Dynamic Text	De grootte wordt bepaald door dynamische tekst
+	Word Gap	Woordafstand
+	Line Gap	Regelafstand

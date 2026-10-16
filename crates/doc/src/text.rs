@@ -265,10 +265,37 @@ pub struct TextWarp {
     pub horizontal: bool,
 }
 
+/// Dynamic Text (Photoshop 26.8 "Block" / "Dynamic fit"): the layer's sizes are derived so its
+/// text fills its box or area. Gaps are percentages of the font size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TextFit {
+    pub word_gap: f32,
+    pub line_gap: f32,
+}
+
+impl TextFit {
+    pub const GAP_MIN: f32 = -50.0;
+    pub const GAP_MAX: f32 = 200.0;
+
+    /// Non-finite gaps become 0; finite ones clamp to `GAP_MIN..=GAP_MAX`.
+    pub fn sanitized(self) -> Self {
+        let clean = |g: f32| if g.is_finite() { g.clamp(Self::GAP_MIN, Self::GAP_MAX) } else { 0.0 };
+        Self { word_gap: clean(self.word_gap), line_gap: clean(self.line_gap) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::TextLayer;
+
+    #[test]
+    fn text_fit_sanitizes() {
+        let f = TextFit { word_gap: f32::NAN, line_gap: 900.0 }.sanitized();
+        assert_eq!(f, TextFit { word_gap: 0.0, line_gap: TextFit::GAP_MAX });
+        assert_eq!(TextFit { word_gap: -70.0, line_gap: f32::NEG_INFINITY }.sanitized(), TextFit { word_gap: TextFit::GAP_MIN, line_gap: 0.0 });
+    }
 
     fn run(len: usize, size: f32) -> TextRun {
         TextRun { len, style: CharStyle { size_pt: size, ..Default::default() } }

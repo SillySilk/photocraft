@@ -3181,3 +3181,9 @@ curves	Smooth	Haluskan
 	set name	nama set
 	{set} (modified)	{set} (diubah)
 	Random	Acak
+	Dynamic Text	Teks Dinamis
+	Convert to Dynamic Text	Konversi ke Teks Dinamis
+	Release Dynamic Text	Lepaskan Teks Dinamis
+	Size is set by Dynamic Text	Ukuran ditentukan oleh Teks Dinamis
+	Word Gap	Jarak Kata
+	Line Gap	Jarak Baris
