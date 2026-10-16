@@ -28,6 +28,12 @@ fn is_fitted(layer: &TextLayer) -> bool {
 /// overflow, the sizes staying within MIN_PT..=MAX_PT. Bounded by MAX_PROBES layouts.
 /// Point/Path layers, fit None, or empty text: scale 1, fits true, 0 probes.
 ///
+/// The scale stops where the largest run reaches MAX_PT, so at the top end every run keeps its
+/// ratio to the others. At the bottom end the search goes down until the largest run is at
+/// MIN_PT, so the smaller runs clamp at MIN_PT before it: text too long for its shape loses its
+/// size ratios there. That loss can't be avoided, since sizes below MIN_PT don't exist and
+/// stopping earlier would leave the text overflowing.
+///
 /// Callers must refuse vertical text, RTL text and multi-layer input before fitting; this solver
 /// does not check for them.
 pub fn fit_scale(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> FitResult {
@@ -37,8 +43,7 @@ pub fn fit_scale(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) ->
     let fallback = sane_fallback(layer);
     let sizes: Vec<f32> = layer.char_runs().iter().map(|r| sane(r.style.size_pt, fallback).max(MIN_PT)).collect();
     let max_run = sizes.iter().copied().fold(MIN_PT, f32::max);
-    let min_run = sizes.iter().copied().fold(MAX_PT, f32::min);
-    let (lo, hi) = (MIN_PT / max_run, MAX_PT / min_run);
+    let (lo, hi) = (MIN_PT / max_run, MAX_PT / max_run);
 
     let probe_count = std::cell::Cell::new(0);
     let probe = |engine: &mut crate::TextEngine, scale: f32| {
@@ -926,6 +931,20 @@ mod tests {
         let mut bigger = t.clone();
         apply_scale(&mut bigger, 1.02);
         assert!(e.layout(&bigger, 72.0).overflowed);
+    }
+
+    #[test]
+    fn area_fit_keeps_run_ratios_at_the_top_end() {
+        // A shape far bigger than the type can grow: the largest run reaches MAX_PT first, and
+        // the smaller one keeps its 1:10 ratio instead of catching up at the clamp.
+        let mut e = TextEngine::new();
+        let mut t = area_ellipse_layer("big small", 12.0, 60_000.0, 60_000.0);
+        set_run_sizes(&mut t, &[(3, 10.0), (6, 100.0)]); // "big" 10pt, " small" 100pt
+        t.fit = Some(TextFit::default());
+        refit(&mut e, &mut t, 72.0);
+        let s: Vec<f32> = t.runs.iter().map(|r| r.style.size_pt).collect();
+        assert!((s[1] / s[0] - 10.0).abs() < 1e-3, "{s:?}");
+        assert!((s[1] - MAX_PT).abs() < 1.0, "{s:?}");
     }
 
     #[test]
