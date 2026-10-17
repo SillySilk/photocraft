@@ -137,8 +137,9 @@ fn release(s: &mut Session, p: &Value) -> Result<Value> {
         if t.fit.is_none() {
             return Err(bad(RELEASE, NOT_FITTED));
         }
-        // Photoshop's toggle off: the text goes back to its own sizes. A box kept them while
-        // fitted; Area text holds its fitted sizes, so they are scaled back.
+        // Photoshop's toggle off: the text goes back to its own sizes, which box and area text
+        // keep while fitted. Only area text saved by the uniform-fit build holds fitted sizes
+        // (`area_scale`); they are scaled back.
         if !keep_look {
             let area_scale = t.fit.take().map_or(1.0, |f| f.area_scale);
             if area_scale.is_finite() && area_scale > 0.0 && area_scale != 1.0 {
@@ -212,7 +213,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Release Dynamic Text",
             menu: &["Type"],
             shortcut: None,
-            params: r##"{"layer":id? (default active Type layer),"keepLook":bool? (default true; false = back to the text's own sizes, as Photoshop's toggle does)} → fit off; with keepLook a box keeps its look as ordinary type (a size and a line break per line), an area its fitted size"##,
+            params: r##"{"layer":id? (default active Type layer),"keepLook":bool? (default true; false = back to the text's own sizes, as Photoshop's toggle does)} → fit off; with keepLook the text keeps its look as ordinary type (a size and a line break per line), a box and an area alike"##,
             enabled: has_fit,
             journal: true,
             run: release,

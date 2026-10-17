@@ -210,7 +210,7 @@ pub struct TextLayout {
     pub decorations: Vec<DecorationRect>,
     pub lines: Vec<LineInfo>,
     pub clusters: Vec<ClusterInfo>,
-    /// Resolved character styles: one per run of the layer, then for Dynamic Text box lines not
+    /// Resolved character styles: one per run of the layer, then for solved Dynamic Text lines not
     /// at scale 1, scaled copies the glyphs of those lines use.
     pub styles: Vec<CharStyle>,
     /// Pixels per point used (dpi / 72).
@@ -222,10 +222,10 @@ pub struct TextLayout {
     /// 0.5 px wider than the width it was broken at (box or span less indents, and on a
     /// paragraph's first line less the first-line indent). Horizontal scale and manual or
     /// optical kerning are applied after line breaking and never count: lines they push past
-    /// the edge are drawn as before but not flagged. A solved Dynamic Text box line counts by
+    /// the edge are drawn as before but not flagged. A solved Dynamic Text line counts by
     /// its visible width (`x1 - x0`, scale and kerning included), as the solver sizes it, so
-    /// one that clamping left wider than the box counts as too wide. Always false for point and
-    /// path text. Dynamic Text's uniform fit uses it as its "too big" test.
+    /// one that clamping left wider than its box or span counts as too wide. Always false for
+    /// point and path text.
     pub overflowed: bool,
     /// Text other than line and paragraph breaks is hidden: the box height or area shape ran out
     /// (an empty last paragraph below the box doesn't count). Implies `overflowed`. Always false
@@ -534,6 +534,11 @@ impl Layouter {
         // Box and area text wrap, align within their lines and hide what doesn't fit.
         let wraps = is_box || area.is_some();
         let mut prev_baseline: Option<f32> = None;
+        // The previous line's descent and largest size (px): a solved Dynamic Text line is
+        // stacked from it, so a big line's descenders never reach the smaller line below.
+        let mut prev_line: Option<(f32, f32)> = None;
+        // Largest scale of the solved area lines placed so far (see `place_solved_area`).
+        let mut solved_max = 0.0f32;
         let mut pending_space = 0.0f32;
         let mut stop = false;
         // Whether hiding the text from `from` on hides anything but line and paragraph breaks
@@ -550,11 +555,11 @@ impl Layouter {
                 _ => SmallCapsMode::None,
             })
             .collect();
-        // Dynamic Text box lines (the fit solver's output): each line starts where the solver
-        // chose and is laid out at its own scale, without wrapping. Empty until the first refresh
-        // solves them; area and point text don't use them.
+        // Dynamic Text lines (the fit solver's output): each line starts where the solver chose
+        // and is laid out at its own scale, without wrapping. Empty until the first refresh
+        // solves them; point and path text don't use them.
         let fit_lines: &[FitLine] = match &t.fit {
-            Some(f) if is_box => f.valid_lines(text),
+            Some(f) if is_box || area.is_some() => f.valid_lines(text),
             _ => &[],
         };
         let solved = !fit_lines.is_empty();
@@ -738,6 +743,12 @@ impl Layouter {
             // below the previous paragraph's last line.
             let space_before = if prev_baseline.is_some() && unit.first { ps.space_before_pt * k } else { 0.0 };
             let area_from = |m: LineMetrics| match (&area, prev_baseline) {
+                // A solved line stacks as in a box: the previous line's descent, its own ascent
+                // and the gap, a percentage of the larger of the two sizes.
+                (Some(_), Some(b)) if solved => {
+                    let (prev_descent, prev_px) = prev_line.unwrap_or((m.descent, m.px));
+                    b + prev_descent + m.ascent + line_gap.unwrap_or(0.0) / 100.0 * prev_px.max(m.px) + pending_space + space_before
+                }
                 (Some(_), Some(b)) => b + m.leading + pending_space + space_before,
                 (Some(a), None) => a.bounds[1] + m.ascent,
                 (None, _) => 0.0,
@@ -757,6 +768,11 @@ impl Layouter {
                 // out taller than the row it was planned in and no second plan is needed.
                 layout.break_all_lines(None);
                 let m = area_metrics(layout, &out.styles, &ps, k, first_style, vertical, line_gap);
+                if solved {
+                    let largest = (!content.chars().all(char::is_whitespace)).then_some(solved_max);
+                    let first = prev_baseline.is_none().then_some(first_px);
+                    return place_solved_area(layout, a, area_from(m), m, unit.scale, largest, first, k, (indent_start, indent_end), first_indent);
+                }
                 break_area(layout, a, area_from(m), m, (indent_start, indent_end), first_px, &area_budget)
             };
             // Paragraph text: a tab is never wider than a space plus one tab interval, so breaking
@@ -824,7 +840,14 @@ impl Layouter {
                     break;
                 }
                 let m = *line.metrics();
-                let LineMetrics { ascent, descent, leading } = line_metrics(&line, &out.styles, &ps, k, first_style, vertical, line_gap);
+                let LineMetrics { ascent, descent, leading, px } = line_metrics(&line, &out.styles, &ps, k, first_style, vertical, line_gap);
+                // Dynamic Text box lines (solved): the previous line's descent, this line's
+                // ascent and the gap, a percentage of the larger of the two sizes. Photoshop's 0%
+                // Line Gap is tight but never collides.
+                let leading = match (solved, line_gap, prev_line) {
+                    (true, Some(gap), Some((prev_descent, prev_px))) => prev_descent + ascent + gap / 100.0 * prev_px.max(px),
+                    _ => leading,
+                };
                 let baseline = match (slot, prev_baseline) {
                     (Some(s), _) => s.baseline,
                     // The first column's right edge touches the box's right edge.
@@ -850,6 +873,10 @@ impl Layouter {
                     break;
                 }
                 prev_baseline = Some(baseline);
+                prev_line = Some((descent, px));
+                if solved && area.is_some() && !content.chars().all(char::is_whitespace) {
+                    solved_max = solved_max.max(unit.scale);
+                }
                 let last_line = li + 1 == nlines;
                 let adv = m.advance - m.trailing_whitespace;
 
@@ -1173,7 +1200,7 @@ impl Layouter {
     }
 }
 
-/// Text laid out as one parley paragraph: a whole paragraph, or with solved Dynamic Text box
+/// Text laid out as one parley paragraph: a whole paragraph, or with solved Dynamic Text
 /// lines, one line of it.
 struct Unit {
     paragraph: usize,
@@ -1289,11 +1316,13 @@ struct Slot {
 }
 
 /// A line's ascent, descent and leading (px); for area type, the largest over a paragraph.
+/// `px` is the line's largest type size (px), which a solved line's gap is a percentage of.
 #[derive(Clone, Copy, Debug)]
 struct LineMetrics {
     ascent: f32,
     descent: f32,
     leading: f32,
+    px: f32,
 }
 
 /// Most line-breaking passes area type makes for one paragraph, over all its plans (each span
@@ -1415,6 +1444,79 @@ fn break_area(
     }
 }
 
+/// Places one solved Dynamic Text area line (laid out unwrapped in `layout`, at `scale`), as
+/// [`crate::fit::solve_area`] planned it. The first line takes the first row area type's row
+/// search finds from `from` (a span at least `first` wide). A later line goes from the baseline
+/// `from` (stacked on the previous line) down in steps of ROW_SKIP_STEP of its height at its
+/// floor scale, at most ROW_SKIP_STEPS steps, to the first band whose widest span
+/// holds the line. It goes in the first span, left to right, that holds it. No band left: no slot
+/// (the line is hidden, never drawn past the shape).
+#[allow(clippy::too_many_arguments)]
+fn place_solved_area(
+    layout: &mut Layout<RunBrush>,
+    area: &crate::area::AreaShape,
+    from: f32,
+    m: LineMetrics,
+    scale: f32,
+    // The largest scale of the solved lines above, or None for an empty line, which steps by
+    // its own height.
+    largest: Option<f32>,
+    // The first line: its first character's size (px), the row search's least span width.
+    first: Option<f32>,
+    k: f32,
+    indents: (f32, f32),
+    first_indent: f32,
+) -> (Vec<Slot>, bool) {
+    use crate::fit::{AREA_MARGIN, MAX_PT, MIN_PT, MIN_ROW_SHARE, ROW_SKIP_STEP, ROW_SKIP_STEPS};
+    let inset = indents.0 + indents.1;
+    let width = layout.lines().next().map_or(0.0, |l| l.metrics().advance - l.metrics().trailing_whitespace);
+    let h = m.ascent + m.descent;
+    // The line's height at its floor scale: the floor clamped as the solver clamps it.
+    // The floor as the solver sets it: MIN_ROW_SHARE of the largest scale above.
+    let step = ROW_SKIP_STEP
+        * match largest {
+            Some(largest) if scale > 0.0 && m.px > 0.0 => {
+                let pt = m.px / (k * scale);
+                h / scale * (MIN_ROW_SHARE * largest).clamp(MIN_PT / pt, MAX_PT / pt)
+            }
+            _ => h,
+        };
+    // The first line: area type's own row search, and no skipping.
+    let steps = if first.is_some() { 0 } else { ROW_SKIP_STEPS };
+    for i in 0..=steps {
+        let (b, spans) = match first {
+            Some(min_width) => match area.next_row(from, m.ascent, m.descent, min_width) {
+                Some(row) => row,
+                None => break,
+            },
+            None => {
+                let b = from + i as f32 * step;
+                if b + m.descent > area.bounds[3] || b.is_nan() {
+                    break;
+                }
+                (b, area.spans(b - m.ascent, b + m.descent, 0.0))
+            }
+        };
+        let widest = spans.iter().map(|s| s.1 - s.0).fold(0.0f32, f32::max);
+        if widest <= 0.0 || width > AREA_MARGIN * (widest - inset - first_indent) + 0.1 {
+            continue;
+        }
+        let Some(&(x0, x1)) = spans.iter().find(|s| width <= s.1 - s.0 - inset - first_indent + 0.5) else { continue };
+        let w = (x1 - x0 - inset).max(1.0);
+        let mut br = layout.break_lines();
+        br.state_mut().set_layout_max_advance(f32::INFINITY);
+        br.state_mut().set_line_max_advance(w);
+        if br.break_next().is_some() {
+            br.set_prior_line_width(w);
+        }
+        br.finish();
+        return (vec![Slot { baseline: b, x: x0, width: w, row: 0, span: 0 }], false);
+    }
+    // Hidden: still break the line, so the layout has one.
+    layout.break_all_lines(None);
+    (Vec::new(), true)
+}
+
 /// One pass of [`break_area`]: each line in the next span, skipping spans too narrow for a
 /// line in `needs` when a later span holds it.
 fn break_area_pass(layout: &mut Layout<RunBrush>, rows: &mut AreaRows<'_>, inset: f32, needs: &[Need]) -> (Vec<Slot>, bool) {
@@ -1497,11 +1599,11 @@ fn line_metrics(
     } else {
         (first_px * 0.8, first_px * 0.2)
     };
+    let px = if max_px > 0.0 { max_px } else { first_px };
     if let Some(gap) = line_gap {
-        let px = if max_px > 0.0 { max_px } else { first_px };
         leading = ascent + descent + gap / 100.0 * px;
     }
-    LineMetrics { ascent, descent, leading }
+    LineMetrics { ascent, descent, leading, px }
 }
 
 /// Largest ascent, descent and leading over the lines of a broken paragraph, by
@@ -1516,8 +1618,8 @@ fn area_metrics(
     line_gap: Option<f32>,
 ) -> LineMetrics {
     layout.lines().map(|line| line_metrics(&line, styles, ps, k, fallback, vertical, line_gap)).fold(
-        LineMetrics { ascent: 0.0, descent: 0.0, leading: 0.0 },
-        |a, b| LineMetrics { ascent: a.ascent.max(b.ascent), descent: a.descent.max(b.descent), leading: a.leading.max(b.leading) },
+        LineMetrics { ascent: 0.0, descent: 0.0, leading: 0.0, px: 0.0 },
+        |a, b| LineMetrics { ascent: a.ascent.max(b.ascent), descent: a.descent.max(b.descent), leading: a.leading.max(b.leading), px: a.px.max(b.px) },
     )
 }
 

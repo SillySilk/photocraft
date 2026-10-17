@@ -630,10 +630,10 @@ impl Ex {
                         .push(format!("layer \"{}\": area type is saved as paragraph text over its path's bounds (PSD area type is not written yet)", l.name));
                 }
                 // Photoshop's own Dynamic Text data is not known: the layer saves as the plain type
-                // it bakes to (a size and a line break per line). Stored TySh data of a fitted box
+                // it bakes to (a size and a line break per line). Stored TySh data of fitted text
                 // is from before the bake, so it is regenerated.
                 // One warning per fitted layer: how it was saved, or why it could not be baked.
-                let baked = if photocraft_text::fit::is_fitted_box(t) {
+                let baked = if photocraft_text::fit::is_fitted_lines(t) {
                     let mut eng = photocraft_text::shared().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     match photocraft_text::fit::bake(&mut eng, t, self.dpi) {
                         Ok(b) => {
@@ -648,7 +648,7 @@ impl Ex {
                 } else {
                     None
                 };
-                if t.fit.is_some() && (baked.is_some() || !photocraft_text::fit::is_fitted_box(t)) {
+                if t.fit.is_some() && (baked.is_some() || !photocraft_text::fit::is_fitted_lines(t)) {
                     self.warnings.push(format!("layer \"{}\": Dynamic Text is saved as regular text", l.name));
                 }
                 let t = baked.as_ref().map_or(t, |(b, _)| b);

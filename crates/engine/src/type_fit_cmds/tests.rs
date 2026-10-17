@@ -80,21 +80,30 @@ fn point_text_becomes_box_then_fits() {
     assert!(text(&s, id).fit.is_none());
 }
 
-#[test]
-fn area_text_fits() {
-    let (mut s, id) = session_with_point_text("Well, that went better than expected.", 12.0);
+/// Box text at 12 pt converted into area text in a 300×200 rectangle path.
+fn session_with_area_text(words: &str) -> (Session, LayerId) {
+    let (mut s, id) = session_with_point_text(words, 12.0);
     s.edit("path", |doc, _| {
         doc.work_path = Some(Path::new(vec![Subpath::polygon(&[(50.0, 50.0), (350.0, 50.0), (350.0, 250.0), (50.0, 250.0)])]));
         Ok(())
     })
     .unwrap();
     s.execute("type.fillPath", json!({"layer": id.0})).unwrap();
+    (s, id)
+}
+
+#[test]
+fn area_text_fits() {
+    let (mut s, id) = session_with_area_text("Well, that went better than expected.");
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
     let t = text(&s, id);
     assert!(matches!(t.shape, TextShape::Area { .. }) && t.fit.is_some());
-    assert!(t.size_pt > 12.0, "fills the area: {}", t.size_pt);
-    // Typing refits again (the scale compounds); toggling off still gives back the own 12 pt.
+    // Per-line sizes: the base 12 pt is kept and the solved lines fill the area.
+    assert!(t.size_pt == 12.0 && run_sizes(&t) == [12.0], "{} {:?}", t.size_pt, run_sizes(&t));
+    assert!(effective(&s, id).0 > 12.0, "fills the area: {:?}", effective(&s, id));
+    // Typing refits from the base sizes; toggling off gives back the own 12 pt.
     s.execute("type.edit", json!({"layer": id.0, "text": "Well, that went better than expected. Much better."})).unwrap();
+    assert_eq!(text(&s, id).size_pt, 12.0);
     s.execute("type.releaseDynamicText", json!({"layer": id.0, "keepLook": false})).unwrap();
     let t = text(&s, id);
     assert!(t.fit.is_none() && matches!(t.shape, TextShape::Area { .. }));
@@ -102,13 +111,78 @@ fn area_text_fits() {
 }
 
 #[test]
+fn area_toggle_off_restores_exact_sizes() {
+    let (mut s, id) = session_with_area_text("Well, that went better than expected. Much better.");
+    let before = text(&s, id);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    assert!(run_sizes(&text(&s, id)) == [12.0] && text(&s, id).size_pt == 12.0, "base sizes stay while fitted");
+    assert!(!text(&s, id).fit.as_ref().unwrap().lines.is_empty());
+    s.execute("type.releaseDynamicText", json!({"layer": id.0, "keepLook": false})).unwrap();
+    let t = text(&s, id);
+    assert!(t.fit.is_none());
+    assert_eq!((t.text.as_str(), run_sizes(&t), t.size_pt, &t.shape), (before.text.as_str(), run_sizes(&before), before.size_pt, &before.shape));
+}
+
+#[test]
+fn legacy_area_scale_file_reverts() {
+    // A fitted Area layer as saved by the uniform-fit build: runs at 24 pt, fit.area_scale 2.0,
+    // no lines. One refresh solves lines; keepLook:false gives back 12 pt.
+    let (mut s, id) = session_with_area_text("Well, that went better than expected.");
+    s.edit("legacy", |doc, _| {
+        if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
+            photocraft_text::fit::apply_scale(t, 2.0);
+            t.fit = Some(TextFit { area_scale: 2.0, ..TextFit::default() });
+        }
+        Ok(())
+    })
+    .unwrap();
+    s.execute("type.edit", json!({"layer": id.0, "text": "Well, that went better than expected."})).unwrap();
+    let t = text(&s, id);
+    assert!(!t.fit.as_ref().unwrap().lines.is_empty() && t.size_pt == 24.0 && t.fit.as_ref().unwrap().area_scale == 2.0, "{:?}", t.fit);
+    s.execute("type.releaseDynamicText", json!({"layer": id.0, "keepLook": false})).unwrap();
+    let t = text(&s, id);
+    assert!(t.fit.is_none() && (t.size_pt - 12.0).abs() < 1e-3 && run_sizes(&t).iter().all(|v| (v - 12.0).abs() < 1e-3), "{} {:?}", t.size_pt, run_sizes(&t));
+}
+
+#[test]
+fn area_release_keeps_the_look() {
+    let (mut s, id) = session_with_area_text("Hey! Did you see what Dynamic Text does to a speech bubble?");
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    let fitted = glyphs(&s, id);
+    let before = history_len(&s);
+    s.execute("type.releaseDynamicText", json!({"layer": id.0})).unwrap();
+    assert_eq!(history_len(&s), before + 1);
+    let t = text(&s, id);
+    assert!(t.fit.is_none() && matches!(t.shape, TextShape::Area { .. }));
+    assert!(run_sizes(&t).len() >= 2 && !run_sizes(&t).contains(&12.0), "explicit per-line sizes: {:?}", run_sizes(&t));
+    let baked = glyphs(&s, id);
+    let mut from = 0;
+    for (i, g) in baked.iter().enumerate() {
+        let hit = fitted[from..].iter().position(|f| f.0 == g.0 && (f.1 - g.1).abs() <= 0.5 && (f.2 - g.2).abs() <= 0.5);
+        let Some(off) = hit else { panic!("glyph {i} {g:?} moved") };
+        from += off + 1;
+    }
+}
+
+#[test]
 fn typing_refits_and_stays_bounded() {
     let (mut s, id) = session_with_box_text("Hi", 12.0, [0.0, 0.0, 200.0, 80.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
     let big = effective(&s, id).0;
+    let before = history_len(&s);
     s.execute("type.edit", json!({"layer": id.0, "text": "Hi ".repeat(400)})).unwrap();
+    assert_eq!(history_len(&s), before + 1, "one bounded refit per edit");
     let (small, smallest) = effective(&s, id);
-    assert!(small < big && smallest >= photocraft_text::fit::MIN_PT - 1e-4, "{big} -> {small}");
+    assert!(small < big, "{big} -> {small}");
+    // Width-only sizing: lines don't shrink below about half the base size to fit the height;
+    // the text past the box bottom is hidden instead.
+    let t = text(&s, id);
+    let lines = t.fit.as_ref().unwrap().lines.clone();
+    assert!(lines.iter().all(|l| l.scale >= photocraft_text::fit::MIN_PT / 12.0) && smallest >= photocraft_text::fit::MIN_PT - 1e-4, "{lines:?}");
+    assert!(lines.len() < 336, "not one word per line: {} lines", lines.len());
+    let dpi = s.active().unwrap().doc.resolution_dpi;
+    let out = photocraft_text::shared().lock().unwrap_or_else(|e| e.into_inner()).layout(&t, dpi);
+    assert!(out.overflowed && out.hidden, "the rest is hidden past the box bottom");
 }
 
 #[test]
