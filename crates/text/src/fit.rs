@@ -792,12 +792,16 @@ fn natural(s: &Segment, first: usize, end: usize) -> f32 {
 }
 
 /// Shortest line a break may make, as a share of the target width `w` (a paragraph's last line
-/// and a lone word are exempt). Fitted to Photoshop's examples (spec: Line choice).
+/// is exempt, and a lone word only when no other chain of lines exists). Fitted to Photoshop's
+/// examples (spec: Line choice).
 const MIN_LINE_FRAC: f32 = 0.35;
 /// Reward for a size change between neighbouring lines (per unit of |ln| width ratio).
-const CONTRAST_WEIGHT: f32 = 0.5;
+const CONTRAST_WEIGHT: f32 = 1.0;
 /// Cost of a line's natural width straying from `w` (per unit of ln² ratio).
 const SIZE_WEIGHT: f32 = 1.0;
+/// Largest width ratio between neighbouring lines that still earns contrast: the zigzag gains
+/// nothing past about 3×, Photoshop's widest step in its examples (GUESS).
+const MAX_CONTRAST: f32 = 3.0;
 /// Widest target natural width the search tries, as a multiple of the box width: lines average
 /// no smaller than about half the layer's base size, and text that still doesn't fit overflows
 /// (layout hides it). GUESS fitted to Photoshop's overflow in its examples (cafe-08).
@@ -811,15 +815,17 @@ const MAX_DP_WORDS: usize = 4096;
 /// Lines no wider than `w` at base size whose widths alternate long and short, as Photoshop's
 /// Dynamic Text lockups do (GUESS fitted to its examples). Per segment, a DP over (line start,
 /// line end) states minimises SIZE_WEIGHT·ln²(width/w) per line minus
-/// CONTRAST_WEIGHT·|ln(w_i/w_{i+1})| between neighbours; a lone word may exceed `w`; ties take
-/// the earlier break.
+/// CONTRAST_WEIGHT·min(|ln(w_i/w_{i+1})|, ln MAX_CONTRAST) between neighbours; a lone word may
+/// exceed `w`; ties take the earlier break.
 ///
-/// A line other than the segment's last must be at least MIN_LINE_FRAC·w wide (unless it already
-/// holds MAX_LINE_WORDS words, the most a line may take), so the DP is O(words × MAX_LINE_WORDS²) time and
-/// O(MAX_DP_WORDS × MAX_LINE_WORDS) memory. One-word lines are always allowed, so every pass has
-/// a chain of lines.
+/// A line other than the segment's last must be at least MIN_LINE_FRAC·w wide, unless it already
+/// holds MAX_LINE_WORDS words (the most a line may take). A lone word narrower than that is
+/// allowed only when a pass has no chain of lines without one; one-word lines always chain, so the
+/// retry always has one. The DP is O(words × MAX_LINE_WORDS²) time and
+/// O(MAX_DP_WORDS × MAX_LINE_WORDS) memory.
 fn contrast_breaks(segs: &[Segment], w: f32) -> Vec<Cand> {
     const D: usize = MAX_LINE_WORDS;
+    let max_gain = MAX_CONTRAST.ln();
     let mut out = Vec::new();
     for (si, s) in segs.iter().enumerate() {
         let n = s.words.len();
@@ -838,13 +844,15 @@ fn contrast_breaks(segs: &[Segment], w: f32) -> Vec<Cand> {
         }
         let nat = |i: usize, j: usize| prefix[j] - prefix[i] - if i > 0 { s.words[i].lead } else { 0.0 };
         let too_wide = |v: f32| v > w * 1.0001;
-        // Line [i, j) is allowed when it is one word, or no wider than `w` and (unless it ends the
-        // segment) at least MIN_LINE_FRAC·w.
-        // A line of MAX_LINE_WORDS words can't widen either, so it is exempt from the minimum.
-        let allowed = |i: usize, j: usize, v: f32| j == i + 1 || (!too_wide(v) && (j == n || j - i == D || v >= MIN_LINE_FRAC * w));
+        // Line [i, j) is allowed when it ends the segment, holds MAX_LINE_WORDS words or is at
+        // least MIN_LINE_FRAC·w wide, and is no wider than `w` unless it is one word. With
+        // `lone`, any one-word line is allowed too.
+        let allowed =
+            |i: usize, j: usize, v: f32, lone: bool| (j == i + 1 || !too_wide(v)) && ((lone && j == i + 1) || j == n || j - i == D || v >= MIN_LINE_FRAC * w);
         let own = |v: f32| SIZE_WEIGHT * (v.max(1e-3) / w.max(1e-3)).ln().powi(2);
-        for base in (0..n).step_by(MAX_DP_WORDS) {
-            let end = (base + MAX_DP_WORDS).min(n);
+        let gain = |a: f32, b: f32| CONTRAST_WEIGHT * (a.max(1e-3) / b.max(1e-3)).ln().abs().min(max_gain);
+        // The lines of words base..end, or None when no chain of allowed lines covers them.
+        let pass = |base: usize, end: usize, lone: bool| -> Option<Vec<Cand>> {
             // best[at(j, d)]: the cheapest cost of everything from `base` up to a line
             // [j - d, j), and the previous line's start (None: the pass's first line).
             let at = |j: usize, d: usize| (j - base) * D + (d - 1);
@@ -857,7 +865,7 @@ fn contrast_breaks(segs: &[Segment], w: f32) -> Vec<Cand> {
                         // Lines only widen as they start earlier: no earlier start is allowed either.
                         break;
                     }
-                    if !allowed(i, j, v) {
+                    if !allowed(i, j, v, lone) {
                         continue;
                     }
                     best[at(j, d)] = if i == base {
@@ -868,7 +876,7 @@ fn contrast_breaks(segs: &[Segment], w: f32) -> Vec<Cand> {
                         for pd in (1..=D.min(i - base)).rev() {
                             let Some((pc, _)) = best[at(i, pd)] else { continue };
                             let p = i - pd;
-                            let c = pc + own(v) - CONTRAST_WEIGHT * (nat(p, i).max(1e-3) / v.max(1e-3)).ln().abs();
+                            let c = pc + own(v) - gain(nat(p, i), v);
                             if pick.is_none_or(|(b, _)| c < b) {
                                 pick = Some((c, Some(p)));
                             }
@@ -877,26 +885,32 @@ fn contrast_breaks(segs: &[Segment], w: f32) -> Vec<Cand> {
                     };
                 }
             }
-            // The cheapest last line (the earliest start on a tie), then walk back. A one-word
-            // last line always chains, so `d = 1` is there to start from.
-            let mut last = (1, f32::INFINITY);
+            // The cheapest last line (the earliest start on a tie), then walk back.
+            let mut last: Option<(usize, f32)> = None;
             for d in (1..=D.min(end - base)).rev() {
                 if let Some((c, _)) = best[at(end, d)]
-                    && c < last.1
+                    && last.is_none_or(|(_, b)| c < b)
                 {
-                    last = (d, c);
+                    last = Some((d, c));
                 }
             }
-            let from = out.len();
-            let (mut i, mut j) = (end - last.0, end);
+            let (d, _) = last?;
+            let mut lines = Vec::new();
+            let (mut i, mut j) = (end - d, end);
             loop {
-                out.push(Cand { seg: si, first: i, end: j, natural: nat(i, j) });
+                lines.push(Cand { seg: si, first: i, end: j, natural: nat(i, j) });
                 match best[at(j, j - i)].and_then(|(_, p)| p) {
                     Some(p) => (i, j) = (p, i),
                     None => break,
                 }
             }
-            out[from..].reverse();
+            lines.reverse();
+            Some(lines)
+        };
+        for base in (0..n).step_by(MAX_DP_WORDS) {
+            let end = (base + MAX_DP_WORDS).min(n);
+            // One-word lines chain on their own, so the retry with `lone` always has lines.
+            out.extend(pass(base, end, false).or_else(|| pass(base, end, true)).unwrap_or_default());
         }
     }
     out
@@ -1278,7 +1292,19 @@ mod tests {
         let scales: Vec<f32> = lines.iter().map(|l| l.scale).collect();
         let (hi, lo) = scales.iter().fold((f32::MIN, f32::MAX), |(h, l), &s| (h.max(s), l.min(s)));
         assert!(lines.len() >= 5, "{lines:?}");
-        assert!(hi / lo >= 2.0, "size contrast {hi}/{lo}: {scales:?}");
+        assert!(hi / lo >= 2.5, "size contrast {hi}/{lo}: {scales:?}");
+        // Short lines of two or three words sit between the long ones.
+        let words: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| CAFE[l.start as usize..lines.get(i + 1).map_or(CAFE.len(), |n| n.start as usize)].split_whitespace().count())
+            .collect();
+        assert!(words.iter().filter(|&&n| n <= 3).count() >= 2, "words per line {words:?}");
+        // Neighbours differ by at most about MAX_CONTRAST.
+        for p in scales.windows(2) {
+            let r = p[0].max(p[1]) / p[0].min(p[1]);
+            assert!(r <= 3.05, "neighbour ratio {r}: {scales:?}");
+        }
     }
 
     #[test]
