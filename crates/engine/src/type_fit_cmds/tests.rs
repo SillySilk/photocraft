@@ -93,6 +93,12 @@ fn area_text_fits() {
     let t = text(&s, id);
     assert!(matches!(t.shape, TextShape::Area { .. }) && t.fit.is_some());
     assert!(t.size_pt > 12.0, "fills the area: {}", t.size_pt);
+    // Typing refits again (the scale compounds); toggling off still gives back the own 12 pt.
+    s.execute("type.edit", json!({"layer": id.0, "text": "Well, that went better than expected. Much better."})).unwrap();
+    s.execute("type.releaseDynamicText", json!({"layer": id.0, "keepLook": false})).unwrap();
+    let t = text(&s, id);
+    assert!(t.fit.is_none() && matches!(t.shape, TextShape::Area { .. }));
+    assert!(t.char_runs().iter().all(|r| (r.style.size_pt - 12.0).abs() < 0.01) && (t.size_pt - 12.0).abs() < 0.01, "{} {:?}", t.size_pt, run_sizes(&t));
 }
 
 #[test]

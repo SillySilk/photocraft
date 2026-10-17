@@ -278,7 +278,7 @@ pub struct FitLine {
 /// Dynamic Text (Photoshop 26.8 "Block" / "Dynamic fit"): the layer's sizes are derived so its
 /// text fills its box or area. The word gap is a percent of each space's own width (-100 removes
 /// the spaces, +100 doubles them); the line gap is a percent of the font size.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TextFit {
     pub word_gap: f32,
@@ -286,6 +286,16 @@ pub struct TextFit {
     /// Solver output for Box text: where each line starts and its size multiplier.
     /// Recomputed on every refresh; empty = not computed yet.
     pub lines: Vec<FitLine>,
+    /// How much Area text's sizes have been scaled since it was converted (Area text holds its
+    /// fitted sizes): turning Dynamic Text off divides by it to give the text its own sizes back.
+    /// Always 1 for Box text, which keeps its base sizes.
+    pub area_scale: f32,
+}
+
+impl Default for TextFit {
+    fn default() -> Self {
+        Self { word_gap: 0.0, line_gap: 0.0, lines: Vec::new(), area_scale: 1.0 }
+    }
 }
 
 impl TextFit {
@@ -299,7 +309,8 @@ impl TextFit {
     pub fn sanitized(self, text: &str) -> Self {
         let (word_gap, line_gap) = self.gaps();
         let valid = self.lines_valid(text);
-        Self { word_gap, line_gap, lines: if valid { self.lines } else { Vec::new() } }
+        let area_scale = if self.area_scale.is_finite() && self.area_scale > 0.0 { self.area_scale } else { 1.0 };
+        Self { word_gap, line_gap, lines: if valid { self.lines } else { Vec::new() }, area_scale }
     }
 
     /// The word and line gaps as [`Self::sanitized`] clamps them, without copying `lines`.
@@ -326,7 +337,7 @@ mod tests {
     use crate::TextLayer;
 
     fn fit(word_gap: f32, line_gap: f32, lines: Vec<FitLine>) -> TextFit {
-        TextFit { word_gap, line_gap, lines }
+        TextFit { word_gap, line_gap, lines, area_scale: 1.0 }
     }
 
     #[test]

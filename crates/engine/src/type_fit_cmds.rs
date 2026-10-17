@@ -137,10 +137,13 @@ fn release(s: &mut Session, p: &Value) -> Result<Value> {
         if t.fit.is_none() {
             return Err(bad(RELEASE, NOT_FITTED));
         }
-        // Photoshop's toggle off: the text goes back to its own sizes. A box always kept them
-        // while fitted; Area text holds its fitted sizes, so it keeps those.
+        // Photoshop's toggle off: the text goes back to its own sizes. A box kept them while
+        // fitted; Area text holds its fitted sizes, so they are scaled back.
         if !keep_look {
-            t.fit = None;
+            let area_scale = t.fit.take().map_or(1.0, |f| f.area_scale);
+            if area_scale.is_finite() && area_scale > 0.0 && area_scale != 1.0 {
+                photocraft_text::fit::apply_scale(t, 1.0 / area_scale);
+            }
             return Ok(());
         }
         // The fitted look becomes ordinary type: a size and a break per line. Layers the solver

@@ -163,6 +163,9 @@ pub fn refit(engine: &mut crate::TextEngine, layer: &mut TextLayer, dpi: f32) ->
     }
     let result = fit_scale(engine, layer, dpi);
     apply_scale(layer, result.scale);
+    if let Some(f) = layer.fit.as_mut() {
+        f.area_scale *= result.scale;
+    }
     result
 }
 

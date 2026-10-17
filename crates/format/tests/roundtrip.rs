@@ -632,7 +632,7 @@ fn fit_round_trips() {
     let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
     let ids: Vec<LayerId> = doc.walk().into_iter().filter(|(_, _, l)| matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.id).collect();
     assert!(!ids.is_empty());
-    let fit = TextFit { word_gap: 10.0, line_gap: -5.0, lines: vec![] };
+    let fit = TextFit { word_gap: 10.0, line_gap: -5.0, lines: vec![], area_scale: 1.0 };
     for id in ids {
         if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
             t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
@@ -655,7 +655,7 @@ fn lines_round_trip() {
         if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
             t.text = "hello world".into();
             t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
-            t.fit = Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: lines.clone() });
+            t.fit = Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: lines.clone(), area_scale: 1.0 });
         }
     }
     let back = load_from_bytes(&save_to_bytes(&doc, &SaveOptions::default()).unwrap()).unwrap();
@@ -696,7 +696,7 @@ fn nan_gaps_clamp_on_load() {
         m.insert("fit".into(), serde_json::json!({ "lineGap": 1e9, "wordGap": -1e9 }));
     });
     let fits = text_fits(&load_from_bytes(&hostile).unwrap());
-    let want = Some(TextFit { word_gap: TextFit::WORD_GAP_MIN, line_gap: TextFit::GAP_MAX, lines: vec![] });
+    let want = Some(TextFit { word_gap: TextFit::WORD_GAP_MIN, line_gap: TextFit::GAP_MAX, lines: vec![], area_scale: 1.0 });
     assert!(!fits.is_empty() && fits.iter().all(|f| *f == want));
 }
 
@@ -708,7 +708,7 @@ fn with_fit_lines(doc: &mut Document, lines: &[FitLine]) {
         if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
             t.text = "héllo world".into();
             t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
-            t.fit = Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: lines.to_vec() });
+            t.fit = Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: lines.to_vec(), area_scale: 1.0 });
         }
     }
 }
@@ -764,12 +764,12 @@ fn non_finite_gaps_save_as_a_loadable_file() {
     assert!(!ids.is_empty());
     for id in ids {
         if let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) {
-            t.fit = Some(TextFit { word_gap: f32::NAN, line_gap: f32::INFINITY, lines: vec![] });
+            t.fit = Some(TextFit { word_gap: f32::NAN, line_gap: f32::INFINITY, lines: vec![], area_scale: 1.0 });
         }
     }
     let back = load_from_bytes(&save_to_bytes(&doc, &SaveOptions::default()).unwrap()).unwrap();
     let fits = text_fits(&back);
-    assert!(!fits.is_empty() && fits.iter().all(|f| *f == Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: vec![] })));
+    assert!(!fits.is_empty() && fits.iter().all(|f| *f == Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: vec![], area_scale: 1.0 })));
 }
 
 #[test]
