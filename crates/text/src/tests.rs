@@ -1,6 +1,8 @@
 use photocraft_color::{Color, PixelFormat, SampleType};
 use photocraft_doc::TextLayer;
-use photocraft_doc::text::{Caps, CharStyle, FontFeature, Orientation, ParagraphRun, ParagraphStyle, TextAlign, TextDirection, TextFit, TextRun, TextShape};
+use photocraft_doc::text::{
+    Caps, CharStyle, FitLine, FontFeature, Orientation, ParagraphRun, ParagraphStyle, TextAlign, TextDirection, TextFit, TextRun, TextShape,
+};
 use photocraft_geom::Affine;
 
 use crate::{TextEngine, fonts};
@@ -2544,6 +2546,30 @@ fn fit_lines_wider_than_box_do_not_rewrap() {
     assert!(l.overflowed);
 }
 
+/// Area type inside the polygon `pts` (text space).
+pub(crate) fn area_layer(text: &str, size_pt: f32, pts: &[(f64, f64)]) -> TextLayer {
+    let mut t = point(text, size_pt);
+    t.shape = TextShape::Area { path: area_poly(pts) };
+    t
+}
+
+#[test]
+fn fit_lines_apply_to_area_type() {
+    // A rectangle area path with two solved lines: the second line starts at "world" and is
+    // twice the size of the first, in its own row.
+    let mut t = area_layer("hello world", 20.0, &[(0.0, 0.0), (400.0, 0.0), (400.0, 300.0), (0.0, 300.0)]);
+    t.fit = Some(TextFit { lines: vec![FitLine { start: 0, scale: 1.0 }, FitLine { start: 6, scale: 2.0 }], ..TextFit::default() });
+    let out = layout_of(&t);
+    assert_eq!(out.lines.len(), 2, "{:?}", out.lines);
+    assert_eq!(out.lines[1].range.start, 6);
+    let h0 = out.lines[0].ascent + out.lines[0].descent;
+    let h1 = out.lines[1].ascent + out.lines[1].descent;
+    assert!((h1 / h0 - 2.0).abs() < 0.05, "{h0} {h1}");
+    // Stacked as solved box lines are: the previous descent, this ascent (line gap 0).
+    let (l0, l1) = (&out.lines[0], &out.lines[1]);
+    assert!((l1.baseline - l0.baseline - (l0.descent + l1.ascent)).abs() < 0.5, "{:?}", out.lines);
+}
+
 #[test]
 fn fit_lines_box_height_still_stops_lines() {
     let mut t = box_layer("aa bb cc", 20.0, (0.0, 0.0, 4000.0, 40.0));
@@ -2554,19 +2580,21 @@ fn fit_lines_box_height_still_stops_lines() {
 }
 
 #[test]
-fn fit_lines_ignored_without_fit_or_for_area() {
+fn fit_lines_ignored_without_fit_or_for_point_text() {
     let lines = fit_lines(&[(0, 2.0), (3, 0.5), (6, 1.0)]);
     let text = "aa bb cc dd ee ff";
     // No fit: plain box text.
     let plain = layout_of(&box_layer(text, 20.0, (0.0, 0.0, 60.0, 400.0)));
     assert!(plain.lines.len() > 1 && plain.glyphs.iter().all(|g| plain.faces[g.face as usize].size_px == 20.0 * plain.px_per_pt));
-    // Area text keeps its uniform fit: lines change nothing.
-    let mut a = area_ellipse_layer(text, 12.0, 120.0, 120.0);
+    // Area text lays its solved lines out (`fit_lines_apply_to_area_type`): one per line start.
+    let mut a = area_ellipse_layer(text, 12.0, 300.0, 300.0);
     a.fit = Some(TextFit::default());
     let without = layout_of(&a);
     a.fit = lines.clone();
-    assert!(same_layout(&without, &layout_of(&a)));
-    // So does point text.
+    let solved = layout_of(&a);
+    assert!(!same_layout(&without, &solved));
+    assert_eq!(solved.lines.iter().map(|ln| ln.range.start).collect::<Vec<_>>(), [0, 3, 6], "{:?}", solved.lines);
+    // Point text ignores them.
     let mut p = point(text, 20.0);
     p.fit = Some(TextFit::default());
     let without = layout_of(&p);

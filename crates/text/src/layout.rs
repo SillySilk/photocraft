@@ -210,7 +210,7 @@ pub struct TextLayout {
     pub decorations: Vec<DecorationRect>,
     pub lines: Vec<LineInfo>,
     pub clusters: Vec<ClusterInfo>,
-    /// Resolved character styles: one per run of the layer, then for Dynamic Text box lines not
+    /// Resolved character styles: one per run of the layer, then for solved Dynamic Text lines not
     /// at scale 1, scaled copies the glyphs of those lines use.
     pub styles: Vec<CharStyle>,
     /// Pixels per point used (dpi / 72).
@@ -222,10 +222,10 @@ pub struct TextLayout {
     /// 0.5 px wider than the width it was broken at (box or span less indents, and on a
     /// paragraph's first line less the first-line indent). Horizontal scale and manual or
     /// optical kerning are applied after line breaking and never count: lines they push past
-    /// the edge are drawn as before but not flagged. A solved Dynamic Text box line counts by
+    /// the edge are drawn as before but not flagged. A solved Dynamic Text line counts by
     /// its visible width (`x1 - x0`, scale and kerning included), as the solver sizes it, so
-    /// one that clamping left wider than the box counts as too wide. Always false for point and
-    /// path text. Dynamic Text's uniform fit uses it as its "too big" test.
+    /// one that clamping left wider than its box or span counts as too wide. Always false for
+    /// point and path text. Dynamic Text's uniform fit uses it as its "too big" test.
     pub overflowed: bool,
     /// Text other than line and paragraph breaks is hidden: the box height or area shape ran out
     /// (an empty last paragraph below the box doesn't count). Implies `overflowed`. Always false
@@ -553,11 +553,11 @@ impl Layouter {
                 _ => SmallCapsMode::None,
             })
             .collect();
-        // Dynamic Text box lines (the fit solver's output): each line starts where the solver
-        // chose and is laid out at its own scale, without wrapping. Empty until the first refresh
-        // solves them; area and point text don't use them.
+        // Dynamic Text lines (the fit solver's output): each line starts where the solver chose
+        // and is laid out at its own scale, without wrapping. Empty until the first refresh
+        // solves them; point and path text don't use them.
         let fit_lines: &[FitLine] = match &t.fit {
-            Some(f) if is_box => f.valid_lines(text),
+            Some(f) if is_box || area.is_some() => f.valid_lines(text),
             _ => &[],
         };
         let solved = !fit_lines.is_empty();
@@ -741,6 +741,12 @@ impl Layouter {
             // below the previous paragraph's last line.
             let space_before = if prev_baseline.is_some() && unit.first { ps.space_before_pt * k } else { 0.0 };
             let area_from = |m: LineMetrics| match (&area, prev_baseline) {
+                // A solved line stacks as in a box: the previous line's descent, its own ascent
+                // and the gap, a percentage of the larger of the two sizes.
+                (Some(_), Some(b)) if solved => {
+                    let (prev_descent, prev_px) = prev_line.unwrap_or((m.descent, m.px));
+                    b + prev_descent + m.ascent + line_gap.unwrap_or(0.0) / 100.0 * prev_px.max(m.px) + pending_space + space_before
+                }
                 (Some(_), Some(b)) => b + m.leading + pending_space + space_before,
                 (Some(a), None) => a.bounds[1] + m.ascent,
                 (None, _) => 0.0,
@@ -760,7 +766,15 @@ impl Layouter {
                 // out taller than the row it was planned in and no second plan is needed.
                 layout.break_all_lines(None);
                 let m = area_metrics(layout, &out.styles, &ps, k, first_style, vertical, line_gap);
-                break_area(layout, a, area_from(m), m, (indent_start, indent_end), first_px, &area_budget)
+                // A solved line is one line that never wraps: it goes on the first row with a
+                // span that holds all of it (none: it is hidden, never drawn outside the shape).
+                let min_width = if solved {
+                    let w = layout.lines().next().map_or(0.0, |l| l.metrics().advance - l.metrics().trailing_whitespace);
+                    (w + indent_start + indent_end - 0.5).max(first_px)
+                } else {
+                    first_px
+                };
+                break_area(layout, a, area_from(m), m, (indent_start, indent_end), min_width, &area_budget)
             };
             // Paragraph text: a tab is never wider than a space plus one tab interval, so breaking
             // lines at that width keeps the expanded tabs inside the box, but can wrap early.
@@ -1184,7 +1198,7 @@ impl Layouter {
     }
 }
 
-/// Text laid out as one parley paragraph: a whole paragraph, or with solved Dynamic Text box
+/// Text laid out as one parley paragraph: a whole paragraph, or with solved Dynamic Text
 /// lines, one line of it.
 struct Unit {
     paragraph: usize,
