@@ -1845,8 +1845,14 @@ fn dynamic_text_toggle(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         && unavailable.is_none()
         && let Some((layer, _)) = target(app)
     {
-        let cmd = if fitted { "type.releaseDynamicText" } else { "type.convertToDynamicText" };
-        if let Err(e) = app.run(cmd, json!({ "layer": layer })) {
+        // Off puts the text back to its own sizes, as Photoshop's toggle does; the Type menu's
+        // Release Dynamic Text keeps the fitted look instead.
+        let (cmd, p) = if fitted {
+            ("type.releaseDynamicText", json!({ "layer": layer, "keepLook": false }))
+        } else {
+            ("type.convertToDynamicText", json!({ "layer": layer }))
+        };
+        if let Err(e) = app.run(cmd, p) {
             app.ui.status = e;
             app.ui.status_error = true;
         }
