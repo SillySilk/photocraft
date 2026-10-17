@@ -588,7 +588,10 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
         // The breaks make the height jump about with `w` (a word moving up can leave a
         // short last line that scales up a lot), so a plain bisection can miss smaller widths
         // that fit. Scan SCAN_PROBES widths from the longest word up (geometric steps), then
-        // bisect between the last one too tall and the first that fits.
+        // bisect between the last one too tall and the first that fits. Of every probe that
+        // fits, the tallest is kept (the smaller `w` on a tie): the block ends as close to the
+        // box bottom as the breaks allow.
+        let mut best_h = h_top;
         let step = (w_max / lo_w).powf(1.0 / SCAN_PROBES as f32);
         let (mut lo, mut hi) = (lo_w, w_max);
         let mut first = true;
@@ -598,7 +601,9 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
             probes += 1;
             if m.2 <= box_h {
                 hi = w;
-                (lines, scales) = (m.0, m.1);
+                if m.2 >= best_h {
+                    (lines, scales, best_h) = m;
+                }
                 break;
             }
             lo = w;
@@ -611,7 +616,9 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
                 probes += 1;
                 if m.2 <= box_h {
                     hi = mid;
-                    (lines, scales) = (m.0, m.1);
+                    if m.2 >= best_h {
+                        (lines, scales, best_h) = m;
+                    }
                 } else {
                     lo = mid;
                 }
@@ -1300,6 +1307,18 @@ mod tests {
             let scale = lines.iter().find(|f| f.start as usize == l.range.start).map(|f| f.scale).unwrap();
             assert!(scale >= 0.3, "visible line at {} has scale {scale}", l.range.start);
         }
+    }
+
+    #[test]
+    fn block_ends_near_the_box_bottom() {
+        // The search keeps the tallest fitting probe: the last line ends within 20% of the box
+        // height above its bottom edge.
+        let mut eng = engine();
+        let mut t = fitted_box(CAFE, 24.0, (0.0, 0.0, 500.0, 400.0));
+        refit(&mut eng, &mut t, 72.0);
+        let out = eng.layout(&t, 72.0);
+        let b = bottom(&out);
+        assert!(!out.hidden && (400.0 * 0.8..=400.5).contains(&b), "block bottom {b}");
     }
 
     #[test]
