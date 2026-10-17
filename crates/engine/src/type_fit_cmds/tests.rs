@@ -106,9 +106,20 @@ fn typing_refits_and_stays_bounded() {
     let (mut s, id) = session_with_box_text("Hi", 12.0, [0.0, 0.0, 200.0, 80.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
     let big = effective(&s, id).0;
+    let before = history_len(&s);
     s.execute("type.edit", json!({"layer": id.0, "text": "Hi ".repeat(400)})).unwrap();
+    assert_eq!(history_len(&s), before + 1, "one bounded refit per edit");
     let (small, smallest) = effective(&s, id);
-    assert!(small < big && smallest >= photocraft_text::fit::MIN_PT - 1e-4, "{big} -> {small}");
+    assert!(small < big, "{big} -> {small}");
+    // Width-only sizing: lines don't shrink below about half the base size to fit the height;
+    // the text past the box bottom is hidden instead.
+    let t = text(&s, id);
+    let lines = t.fit.as_ref().unwrap().lines.clone();
+    assert!(lines.iter().all(|l| l.scale >= photocraft_text::fit::MIN_PT / 12.0) && smallest >= photocraft_text::fit::MIN_PT - 1e-4, "{lines:?}");
+    assert!(lines.len() < 336, "not one word per line: {} lines", lines.len());
+    let dpi = s.active().unwrap().doc.resolution_dpi;
+    let out = photocraft_text::shared().lock().unwrap_or_else(|e| e.into_inner()).layout(&t, dpi);
+    assert!(out.overflowed && out.hidden, "the rest is hidden past the box bottom");
 }
 
 #[test]

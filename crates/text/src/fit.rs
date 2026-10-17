@@ -499,17 +499,21 @@ struct Solved {
     visited: usize,
 }
 
-/// Photoshop Block: lines and per-line scales so each line spans the box width and the block
-/// fits the box height (spec steps 1–6). Empty text → empty Vec. Bounded: ≤ MAX_PROBES search
-/// iterations and at most 1 + REFINE_PASSES layouts.
+/// Photoshop Block: lines and per-line scales so each line spans the box width (spec: Behaviour
+/// 1–3). Empty text → empty Vec. Bounded: ≤ MAX_PROBES search iterations and at most
+/// 1 + REFINE_PASSES layouts.
 ///
-/// Measures every word once (one point-text layout), searches the target natural width `w`
-/// (a geometric scan, then bisection) with greedy breaking over at most MAX_PROBES height
-/// estimates, then lays the chosen lines
-/// out exactly (at most REFINE_PASSES layouts of the whole layer) and corrects each scale by the
-/// width the layout measures. A line starts only at a paragraph, a forced line break or a word
-/// after a space; an empty one keeps scale 1. A box too short for one line per paragraph shrinks
-/// every line by one factor. Each effective size stays within MIN_PT..=MAX_PT.
+/// Measures every word once (one point-text layout), then searches the target natural width `w`
+/// (a geometric scan, then bisection) over at most MAX_PROBES height estimates: the smallest `w`
+/// whose [`contrast_breaks`] lines, each scaled to the box width, stack no taller than the box.
+/// The chosen lines are laid out exactly (at most REFINE_PASSES layouts of the whole layer) and
+/// each scale is corrected by the width the layout measures. A line starts only at a paragraph, a
+/// forced line break or a word after a space; an empty one keeps scale 1. Each effective size
+/// stays within MIN_PT..=MAX_PT.
+///
+/// Sizing is by width only: nothing is shrunk to fit the height. `w` is searched up to
+/// `min(hi_w, MAX_SHRINK_W · box width)`; when even that is too tall, its lines are kept and layout
+/// hides the ones past the box bottom (as Photoshop cuts them off), flagging the layer overflowed.
 ///
 /// Callers must refuse vertical text, RTL text and multi-layer input before solving.
 pub fn solve_box(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Vec<FitLine> {
@@ -548,27 +552,45 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
     }
     let mut layouts = 1;
 
-    // 3. Search the target natural width `w`: the smallest whose greedy lines, each scaled to
+    // 3. Search the target natural width `w`: the smallest whose contrast lines, each scaled to
     // the box width, stack no taller than the box.
     let lo_w = segs.iter().flat_map(|s| s.words.iter().enumerate().map(|(i, w)| if i == 0 { w.lead + w.width } else { w.width })).fold(0.0f32, f32::max);
     let hi_w = segs.iter().map(|s| natural(s, 0, s.words.len())).fold(lo_w, f32::max);
-    let eval = |w: f32| {
-        let lines = greedy(&segs, w);
+    let measure = |lines: Vec<Cand>| {
         let scales: Vec<f32> = lines.iter().map(|c| width_scale(&segs, c)).collect();
         let h = stack(&segs, &lines, &scales, line_gap, k);
         (lines, scales, h)
     };
-    let (mut lines, mut scales, h_hi) = eval(hi_w);
+    let eval = |w: f32| measure(contrast_breaks(&segs, w));
+    // The widest `w` searched: lines may not shrink on average below about 1/MAX_SHRINK_W of the
+    // base size. At `hi_w` every segment is one line, in pieces of at most MAX_LINE_WORDS words.
+    let w_max = hi_w.min(MAX_SHRINK_W * box_w);
+    let (mut lines, mut scales, h_top) = if w_max >= hi_w {
+        let whole = segs
+            .iter()
+            .enumerate()
+            .flat_map(|(seg, s)| {
+                let n = s.words.len();
+                let starts: Vec<usize> = if n == 0 { vec![0] } else { (0..n).step_by(MAX_LINE_WORDS).collect() };
+                starts.into_iter().map(move |first| {
+                    let end = (first + MAX_LINE_WORDS).min(n);
+                    Cand { seg, first, end, natural: natural(s, first, end) }
+                })
+            })
+            .collect();
+        measure(whole)
+    } else {
+        eval(w_max)
+    };
     let mut probes = 1;
-    // 4. Too short: even one line per paragraph is too tall.
-    let too_short = h_hi > box_h;
-    if !too_short && lo_w > 0.0 && lo_w < hi_w {
-        // Greedy breaking makes the height jump about with `w` (a word moving up can leave a
+    // Too tall even at `w_max`: those lines are kept and layout hides the ones past the bottom.
+    if h_top <= box_h && lo_w > 0.0 && lo_w < w_max {
+        // The breaks make the height jump about with `w` (a word moving up can leave a
         // short last line that scales up a lot), so a plain bisection can miss smaller widths
         // that fit. Scan SCAN_PROBES widths from the longest word up (geometric steps), then
         // bisect between the last one too tall and the first that fits.
-        let step = (hi_w / lo_w).powf(1.0 / SCAN_PROBES as f32);
-        let (mut lo, mut hi) = (lo_w, hi_w);
+        let step = (w_max / lo_w).powf(1.0 / SCAN_PROBES as f32);
+        let (mut lo, mut hi) = (lo_w, w_max);
         let mut first = true;
         for i in 0..SCAN_PROBES {
             let w = lo_w * step.powi(i as i32);
@@ -597,17 +619,12 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
         }
     }
 
-    // Each line's target width: the box less its indents, times the common factor that makes
-    // the block fit when the box is too short (spec step 5).
-    let mut target: Vec<f32> = lines.iter().map(|c| line_target(&segs, c)).collect();
-    if too_short {
-        let f = shrink_factor(&segs, &lines, &scales, line_gap, k, box_h);
-        let _ = shrink(&segs, &lines, &mut scales, &mut target, f);
-    }
+    // Each line's target width: the box less its indents.
+    let target: Vec<f32> = lines.iter().map(|c| line_target(&segs, c)).collect();
 
-    // 5. Exact widths: lay the chosen lines out and correct each scale by the visible width
-    // layout measures (kerning, horizontal scale, optical sizes), and the whole block by its measured height. The scales
-    // returned are the ones last laid out.
+    // 4. Exact widths: lay the chosen lines out and correct each scale by the visible width
+    // layout measures (kerning, horizontal scale, optical sizes). The scales returned are the
+    // ones last laid out.
     let starts: Vec<u32> = lines.iter().map(|c| line_start(&segs, c) as u32).collect();
     let mut fits = true;
     for pass in 0..REFINE_PASSES {
@@ -619,7 +636,6 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
         let bottom = out.lines.last().map_or(0.0, |l| l.baseline + l.descent) - box_y;
         // Fits: nothing hidden and the last line's descent inside the box too.
         fits = !out.hidden && bottom <= box_h + FIT_EPS;
-        let tall = out.hidden || bottom > box_h;
         let mut next = scales.clone();
         let mut changed = false;
         let mut at = 0;
@@ -635,12 +651,6 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
             let s = clamp_scale(&segs, c, scales[i] * target[i] / advance);
             changed |= s != scales[i];
             next[i] = s;
-        }
-        if tall && bottom > 0.0 {
-            // The estimate fell short of the real height: shrink the block to fit (by more when
-            // lines are hidden, as the bottom shown doesn't count them).
-            let f = (box_h / bottom).min(1.0) * if out.hidden { 0.9 } else { 0.999 };
-            changed |= shrink(&segs, &lines, &mut next, &mut target, f);
         }
         if !changed || pass + 1 == REFINE_PASSES {
             break;
@@ -774,26 +784,113 @@ fn natural(s: &Segment, first: usize, end: usize) -> f32 {
     s.words.get(first..end).map_or(0.0, |ws| ws.iter().enumerate().map(|(i, w)| if i > 0 || first == 0 { w.lead + w.width } else { w.width }).sum())
 }
 
-/// Greedy lines no wider than `w` at base size (a longer single word gets its own line).
-fn greedy(segs: &[Segment], w: f32) -> Vec<Cand> {
+/// Shortest line a break may make, as a share of the target width `w` (a paragraph's last line
+/// and a lone word are exempt). Fitted to Photoshop's examples (spec: Line choice).
+const MIN_LINE_FRAC: f32 = 0.35;
+/// Reward for a size change between neighbouring lines (per unit of |ln| width ratio).
+const CONTRAST_WEIGHT: f32 = 0.5;
+/// Cost of a line's natural width straying from `w` (per unit of ln² ratio).
+const SIZE_WEIGHT: f32 = 1.0;
+/// Widest target natural width the search tries, as a multiple of the box width: lines average
+/// no smaller than about half the layer's base size, and text that still doesn't fit overflows
+/// (layout hides it). GUESS fitted to Photoshop's overflow in its examples (cafe-08).
+const MAX_SHRINK_W: f32 = 2.0;
+/// Most words one line may take (bounds the DP).
+const MAX_LINE_WORDS: usize = 64;
+/// Most words one DP pass takes (spec: Solver bounds); a longer segment is broken in passes of
+/// this many words, each pass's last line ending at the pass end.
+const MAX_DP_WORDS: usize = 4096;
+
+/// Lines no wider than `w` at base size whose widths alternate long and short, as Photoshop's
+/// Dynamic Text lockups do (GUESS fitted to its examples). Per segment, a DP over (line start,
+/// line end) states minimises SIZE_WEIGHT·ln²(width/w) per line minus
+/// CONTRAST_WEIGHT·|ln(w_i/w_{i+1})| between neighbours; a lone word may exceed `w`; ties take
+/// the earlier break.
+///
+/// A line other than the segment's last must be at least MIN_LINE_FRAC·w wide (unless it already
+/// holds MAX_LINE_WORDS words, the most a line may take), so the DP is O(words × MAX_LINE_WORDS²) time and
+/// O(MAX_DP_WORDS × MAX_LINE_WORDS) memory. One-word lines are always allowed, so every pass has
+/// a chain of lines.
+fn contrast_breaks(segs: &[Segment], w: f32) -> Vec<Cand> {
+    const D: usize = MAX_LINE_WORDS;
     let mut out = Vec::new();
     for (si, s) in segs.iter().enumerate() {
-        if s.words.is_empty() {
+        let n = s.words.len();
+        if n == 0 {
             out.push(Cand { seg: si, first: 0, end: 0, natural: 0.0 });
             continue;
         }
-        let mut first = 0;
-        let mut width = natural(s, 0, 1);
-        for (j, word) in s.words.iter().enumerate().skip(1) {
-            if width + word.lead + word.width <= w {
-                width += word.lead + word.width;
-            } else {
-                out.push(Cand { seg: si, first, end: j, natural: width });
-                first = j;
-                width = word.width;
-            }
+        // `natural(s, i, j)` in O(1): a prefix sum of lead + width, less the lead of the line's
+        // first word unless it starts the segment.
+        let mut prefix = Vec::with_capacity(n + 1);
+        let mut acc = 0.0f32;
+        prefix.push(acc);
+        for wd in &s.words {
+            acc += wd.lead + wd.width;
+            prefix.push(acc);
         }
-        out.push(Cand { seg: si, first, end: s.words.len(), natural: width });
+        let nat = |i: usize, j: usize| prefix[j] - prefix[i] - if i > 0 { s.words[i].lead } else { 0.0 };
+        let too_wide = |v: f32| v > w * 1.0001;
+        // Line [i, j) is allowed when it is one word, or no wider than `w` and (unless it ends the
+        // segment) at least MIN_LINE_FRAC·w.
+        // A line of MAX_LINE_WORDS words can't widen either, so it is exempt from the minimum.
+        let allowed = |i: usize, j: usize, v: f32| j == i + 1 || (!too_wide(v) && (j == n || j - i == D || v >= MIN_LINE_FRAC * w));
+        let own = |v: f32| SIZE_WEIGHT * (v.max(1e-3) / w.max(1e-3)).ln().powi(2);
+        for base in (0..n).step_by(MAX_DP_WORDS) {
+            let end = (base + MAX_DP_WORDS).min(n);
+            // best[at(j, d)]: the cheapest cost of everything from `base` up to a line
+            // [j - d, j), and the previous line's start (None: the pass's first line).
+            let at = |j: usize, d: usize| (j - base) * D + (d - 1);
+            let mut best: Vec<Option<(f32, Option<usize>)>> = vec![None; (end - base + 1) * D];
+            for j in base + 1..=end {
+                for d in 1..=D.min(j - base) {
+                    let i = j - d;
+                    let v = nat(i, j);
+                    if d > 1 && too_wide(v) {
+                        // Lines only widen as they start earlier: no earlier start is allowed either.
+                        break;
+                    }
+                    if !allowed(i, j, v) {
+                        continue;
+                    }
+                    best[at(j, d)] = if i == base {
+                        Some((own(v), None))
+                    } else {
+                        // Earliest previous start first, so a tie keeps the earlier break.
+                        let mut pick: Option<(f32, Option<usize>)> = None;
+                        for pd in (1..=D.min(i - base)).rev() {
+                            let Some((pc, _)) = best[at(i, pd)] else { continue };
+                            let p = i - pd;
+                            let c = pc + own(v) - CONTRAST_WEIGHT * (nat(p, i).max(1e-3) / v.max(1e-3)).ln().abs();
+                            if pick.is_none_or(|(b, _)| c < b) {
+                                pick = Some((c, Some(p)));
+                            }
+                        }
+                        pick
+                    };
+                }
+            }
+            // The cheapest last line (the earliest start on a tie), then walk back. A one-word
+            // last line always chains, so `d = 1` is there to start from.
+            let mut last = (1, f32::INFINITY);
+            for d in (1..=D.min(end - base)).rev() {
+                if let Some((c, _)) = best[at(end, d)]
+                    && c < last.1
+                {
+                    last = (d, c);
+                }
+            }
+            let from = out.len();
+            let (mut i, mut j) = (end - last.0, end);
+            loop {
+                out.push(Cand { seg: si, first: i, end: j, natural: nat(i, j) });
+                match best[at(j, j - i)].and_then(|(_, p)| p) {
+                    Some(p) => (i, j) = (p, i),
+                    None => break,
+                }
+            }
+            out[from..].reverse();
+        }
     }
     out
 }
@@ -839,59 +936,23 @@ fn width_scale(segs: &[Segment], c: &Cand) -> f32 {
 /// lines: the first line's ascent, then each line's ascent + descent + line gap (percent of its
 /// largest size), plus paragraph spacing, then the last descent.
 fn stack(segs: &[Segment], lines: &[Cand], scales: &[f32], line_gap: f32, k: f32) -> f32 {
-    let (fixed, scaled) = stack_parts(segs, lines, scales, line_gap, k);
-    fixed + scaled
-}
-
-/// [`stack`] split into the part that doesn't follow the line scales (paragraph spacing and
-/// empty lines) and the part that does.
-fn stack_parts(segs: &[Segment], lines: &[Cand], scales: &[f32], line_gap: f32, k: f32) -> (f32, f32) {
-    let (mut fixed, mut scaled) = (0.0f32, 0.0f32);
+    let mut h = 0.0f32;
     let n = lines.len();
     for (i, (c, &s)) in lines.iter().zip(scales).enumerate() {
         let seg = &segs[c.seg];
         let empty = c.first >= c.end;
         let px = line_pt(segs, c) * k * if empty { 1.0 } else { s };
         let (asc, desc) = (seg.ascent * px, seg.descent * px);
-        let mut h = if i == 0 { asc } else { asc + desc + line_gap * px };
+        h += if i == 0 { asc } else { asc + desc + line_gap * px };
         if i + 1 == n {
             h += desc;
         }
         if i > 0 && seg.para_first && c.first == 0 {
             let prev = &segs[lines[i - 1].seg];
-            fixed += prev.space_after + seg.space_before;
-        }
-        if empty {
-            fixed += h;
-        } else {
-            scaled += h;
+            h += prev.space_after + seg.space_before;
         }
     }
-    (fixed, scaled)
-}
-
-/// Multiplies the scale and target of every non-empty line by `f`. Whether any scale changed
-/// (empty lines and clamped ones can't shrink).
-fn shrink(segs: &[Segment], lines: &[Cand], scales: &mut [f32], target: &mut [f32], f: f32) -> bool {
-    let mut changed = false;
-    for ((s, t), c) in scales.iter_mut().zip(target.iter_mut()).zip(lines) {
-        if c.first < c.end {
-            let next = clamp_scale(segs, c, *s * f);
-            changed |= next != *s;
-            *s = next;
-            *t *= f;
-        }
-    }
-    changed
-}
-
-/// The common factor that makes the stacked block `box_h` tall (spec step 5).
-fn shrink_factor(segs: &[Segment], lines: &[Cand], scales: &[f32], line_gap: f32, k: f32, box_h: f32) -> f32 {
-    let (fixed, scaled) = stack_parts(segs, lines, scales, line_gap, k);
-    if scaled <= 0.0 {
-        return 1.0;
-    }
-    ((box_h - fixed) / scaled).clamp(1e-6, 1.0)
+    h
 }
 
 #[cfg(test)]
@@ -914,6 +975,17 @@ mod tests {
         let mut t = box_layer(text, size, (0.0, 0.0, w, h));
         t.fit = Some(TextFit::default());
         t
+    }
+
+    /// `box_layer` with Dynamic Text on (default gaps).
+    fn fitted_box(text: &str, pt: f32, rect: (f32, f32, f32, f32)) -> TextLayer {
+        let mut t = box_layer(text, pt, rect);
+        t.fit = Some(TextFit::default());
+        t
+    }
+
+    fn engine() -> TextEngine {
+        TextEngine::new()
     }
 
     /// Splits the layer's text into runs of the given (byte length, size) pairs.
@@ -1156,26 +1228,119 @@ mod tests {
     }
 
     #[test]
-    fn block_fits_box_height() {
+    fn block_fits_box_height_when_width_sizing_allows() {
+        // Width-only sizing: the `w` search still picks lines whose stack fits the box, so when
+        // such lines exist nothing is hidden and the block ends inside the box.
         let mut e = TextEngine::new();
-        for (text, w, h, line_gap) in
-            [(FOX, 400.0, 300.0, 0.0), (FOX, 300.0, 500.0, 50.0), ("I AM A\nEXPANDABLE", 400.0, 120.0, -50.0), (FOX, 250.0, 90.0, 200.0)]
-        {
+        for (text, w, h, line_gap) in [(FOX, 400.0, 300.0, 0.0), (FOX, 300.0, 500.0, 50.0), (FOX, 250.0, 90.0, 200.0)] {
             let mut t = fit_box(text, 12.0, w, h);
             t.fit = Some(TextFit { line_gap, ..Default::default() });
             let (_, l) = solved(&mut e, t);
             assert!(bottom(&l) <= h + 0.5, "{text:?} {w}x{h} gap {line_gap}: bottom {}", bottom(&l));
             assert!(!l.overflowed && !l.hidden, "{text:?} {w}x{h} gap {line_gap}");
         }
+        // One line per paragraph is already taller than the box: the lines keep spanning its
+        // width (no height shrink), the last one hangs past the bottom and the fit reports it.
+        let mut t = fit_box("I AM A\nEXPANDABLE", 12.0, 400.0, 120.0);
+        t.fit = Some(TextFit { line_gap: -50.0, ..Default::default() });
+        let r = refit(&mut e, &mut t, 72.0);
+        let l = e.layout(&t, 72.0);
+        assert_spans(&l, 400.0);
+        assert!(!r.fits && bottom(&l) > 120.5, "bottom {}", bottom(&l));
     }
 
     #[test]
-    fn too_short_box_shrinks_all_lines() {
+    fn too_short_box_hides_lines_instead_of_shrinking() {
+        // Even one line per paragraph is too tall: the lines keep spanning the box width and the
+        // ones below the bottom are hidden (Photoshop cuts them off), the layer flagged overflowed.
         let mut e = TextEngine::new();
         let (t, l) = solved(&mut e, fit_box("ONE\nTWO WORDS\nTHREE", 12.0, 400.0, 20.0));
         assert_eq!(scales(&t).len(), 3, "one line per paragraph: {:?}", scales(&t));
-        assert!(widths(&l).iter().all(|&w| w < 399.0), "{:?}", widths(&l));
-        assert!(bottom(&l) <= 20.5 && !l.hidden, "bottom {}", bottom(&l));
+        assert_spans(&l, 400.0);
+        assert!(l.hidden && l.overflowed && l.lines.len() < 3, "{} visible", l.lines.len());
+    }
+
+    const CAFE: &str = "Typography is considered as an art form in itself. People have spent their entire lives in the study and art of typography. If you think this is new? Remember that the Romans created the Romanized fonts that we use today over 2,000 years ago. The Chinese and Middle Eastern cultures have been designing with type for thousands of years";
+
+    #[test]
+    fn lines_mix_long_and_short_for_contrast() {
+        // Photoshop's examples: natural widths vary 2-3x within one block.
+        let mut eng = engine();
+        let t = fitted_box(CAFE, 24.0, (0.0, 0.0, 500.0, 400.0));
+        let lines = solve_box(&mut eng, &t, 72.0);
+        let scales: Vec<f32> = lines.iter().map(|l| l.scale).collect();
+        let (hi, lo) = scales.iter().fold((f32::MIN, f32::MAX), |(h, l), &s| (h.max(s), l.min(s)));
+        assert!(lines.len() >= 5, "{lines:?}");
+        assert!(hi / lo >= 2.0, "size contrast {hi}/{lo}: {scales:?}");
+    }
+
+    #[test]
+    fn every_visible_line_spans_the_box() {
+        let mut eng = engine();
+        let mut t = fitted_box(CAFE, 24.0, (0.0, 0.0, 500.0, 400.0));
+        refit(&mut eng, &mut t, 72.0);
+        let out = eng.layout(&t, 72.0);
+        for l in &out.lines {
+            assert!((l.x1 - l.x0 - 500.0).abs() <= 1.0, "{} wide", l.x1 - l.x0);
+        }
+    }
+
+    #[test]
+    fn too_long_text_overflows_instead_of_shrinking() {
+        let mut eng = engine();
+        let mut t = fitted_box(&CAFE.repeat(6), 24.0, (0.0, 0.0, 300.0, 120.0));
+        refit(&mut eng, &mut t, 72.0);
+        let out = eng.layout(&t, 72.0);
+        assert!(out.hidden && out.overflowed, "lines past the bottom are hidden");
+        // Width-only: visible lines still span the box (not shrunk to fit the height).
+        assert!(out.lines.iter().all(|l| (l.x1 - l.x0 - 300.0).abs() <= 1.0));
+        // Not shrunk to fit: the visible lines stay near the base size (MAX_SHRINK_W bounds `w`).
+        let lines = &t.fit.as_ref().unwrap().lines;
+        for l in &out.lines {
+            let scale = lines.iter().find(|f| f.start as usize == l.range.start).map(|f| f.scale).unwrap();
+            assert!(scale >= 0.3, "visible line at {} has scale {scale}", l.range.start);
+        }
+    }
+
+    #[test]
+    fn taller_box_gives_more_lines() {
+        let mut eng = engine();
+        let short = solve_box(&mut eng, &fitted_box(CAFE, 24.0, (0.0, 0.0, 500.0, 250.0)), 72.0).len();
+        let tall = solve_box(&mut eng, &fitted_box(CAFE, 24.0, (0.0, 0.0, 500.0, 900.0)), 72.0).len();
+        assert!(tall > short, "{short} -> {tall}");
+    }
+
+    #[test]
+    fn paragraph_longer_than_one_dp_pass_keeps_every_word_in_order() {
+        // MAX_DP_WORDS bounds one DP pass; a longer paragraph is broken in passes, still one
+        // line after another with no word lost.
+        let words = MAX_DP_WORDS + 900;
+        let segs = vec![Segment {
+            start: 0,
+            words: (0..words).map(|i| Word { start: i * 5, lead: if i == 0 { 0.0 } else { 4.0 }, width: 20.0 + (i % 7) as f32 * 6.0, pt: 12.0 }).collect(),
+            para_first: true,
+            ascent: 0.8,
+            descent: 0.2,
+            pt: 12.0,
+            avail: 400.0,
+            first_indent: 0.0,
+            space_before: 0.0,
+            space_after: 0.0,
+        }];
+        let lines = contrast_breaks(&segs, 300.0);
+        assert_eq!(lines.first().map(|c| c.first), Some(0));
+        assert_eq!(lines.last().map(|c| c.end), Some(words));
+        assert!(lines.windows(2).all(|p| p[0].end == p[1].first && p[0].first < p[0].end), "lines chain");
+        assert!(lines.iter().any(|c| c.end == MAX_DP_WORDS), "a pass ends a line");
+        assert!(lines.iter().all(|c| c.end - c.first == 1 || c.natural <= 300.0 * 1.0001));
+    }
+
+    #[test]
+    fn one_huge_word_gets_its_own_clamped_line() {
+        let mut eng = engine();
+        let lines = solve_box(&mut eng, &fitted_box(&"x".repeat(500), 24.0, (0.0, 0.0, 300.0, 300.0)), 72.0);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].scale * 24.0 >= MIN_PT - 1e-4);
     }
 
     #[test]
@@ -1385,14 +1550,18 @@ THREE",
     }
 
     #[test]
-    fn long_text_in_a_tiny_box_bottoms_out_at_minimum() {
+    fn long_text_in_a_tiny_box_overflows_at_its_width_size() {
+        // Width-only: each line is sized to span the 2 px box (never below MIN_PT) and not
+        // shrunk further to fit the height; what doesn't fit is hidden.
         let mut e = TextEngine::new();
         let mut t = fit_box(&"word ".repeat(5000), 12.0, 2.0, 2.0);
         let r = refit(&mut e, &mut t, 72.0);
         let s = scales(&t);
         assert!(!s.is_empty() && s.iter().all(|v| v.is_finite() && *v > 0.0) && r.probes <= MAX_PROBES);
         let smallest = s.iter().map(|v| v * t.size_pt).fold(f32::MAX, f32::min);
-        assert!((smallest - MIN_PT).abs() < 1e-4, "smallest effective size {smallest}");
+        assert!(smallest > 2.0 * MIN_PT, "sized by width, not bottomed out at MIN_PT: {smallest}");
+        let l = e.layout(&t, 72.0);
+        assert!(!r.fits && l.hidden && l.overflowed);
     }
 
     #[test]
