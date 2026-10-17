@@ -129,9 +129,19 @@ fn convert(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn release(s: &mut Session, p: &Value) -> Result<Value> {
     single_layer(s, RELEASE, p)?;
+    let keep_look = match p.get("keepLook") {
+        None | Some(Value::Null) => true,
+        Some(v) => v.as_bool().ok_or_else(|| bad(RELEASE, "\"keepLook\" must be true or false"))?,
+    };
     with_text(s, p, "Release Dynamic Text", |t, doc| {
         if t.fit.is_none() {
             return Err(bad(RELEASE, NOT_FITTED));
+        }
+        // Photoshop's toggle off: the text goes back to its own sizes. A box always kept them
+        // while fitted; Area text holds its fitted sizes, so it keeps those.
+        if !keep_look {
+            t.fit = None;
+            return Ok(());
         }
         // The fitted look becomes ordinary type: a size and a break per line. Layers the solver
         // never fitted (vertical, right-to-left) have no solved lines to bake.
@@ -199,7 +209,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Release Dynamic Text",
             menu: &["Type"],
             shortcut: None,
-            params: r##"{"layer":id? (default active Type layer)} → fit off; a box keeps its look as ordinary type (a size and a line break per line), an area its fitted size"##,
+            params: r##"{"layer":id? (default active Type layer),"keepLook":bool? (default true; false = back to the text's own sizes, as Photoshop's toggle does)} → fit off; with keepLook a box keeps its look as ordinary type (a size and a line break per line), an area its fitted size"##,
             enabled: has_fit,
             journal: true,
             run: release,

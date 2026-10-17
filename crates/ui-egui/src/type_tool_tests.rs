@@ -2258,10 +2258,10 @@ mod dynamic_text_ui {
         h.get_by_label("Dynamic Text").click();
         h.run_steps(3);
         assert!(!fitted(&h, id));
-        // Release keeps the per-line look: sizes and breaks are baked into the runs.
+        // Off puts the text back as it was before the toggle, as in Photoshop: 12 pt, no breaks.
         let t = text(h.state(), id);
-        assert!(t.runs.iter().any(|r| r.style.size_pt > 12.0), "the line stays big: {:?}", t.runs.iter().map(|r| r.style.size_pt).collect::<Vec<_>>());
-        assert!(t.size_pt > 12.0, "summary follows the first run: {}", t.size_pt);
+        assert!(t.runs.iter().all(|r| r.style.size_pt == 12.0) && t.size_pt == 12.0, "{:?}", t.runs.iter().map(|r| r.style.size_pt).collect::<Vec<_>>());
+        assert_eq!(t.text, "Hello");
     }
 
     #[test]

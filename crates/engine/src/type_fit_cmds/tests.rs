@@ -154,6 +154,24 @@ fn release_keeps_sizes() {
 }
 
 #[test]
+fn release_without_keep_look_restores_the_text() {
+    let (mut s, id) = session_with_box_text("Hello dynamic world of text", 12.0, [0.0, 0.0, 300.0, 150.0]);
+    let before = text(&s, id);
+    s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
+    s.execute("type.setDynamicText", json!({"layer": id.0, "wordGap": 40})).unwrap();
+    s.execute("type.releaseDynamicText", json!({"layer": id.0, "keepLook": false})).unwrap();
+    let t = text(&s, id);
+    assert!(t.fit.is_none());
+    assert_eq!((t.text.as_str(), run_sizes(&t), t.size_pt, &t.shape), (before.text.as_str(), run_sizes(&before), before.size_pt, &before.shape));
+    // One undo step brings the fitted look back.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(text(&s, id).fit.is_some());
+    let n = history_len(&s);
+    assert!(s.execute("type.releaseDynamicText", json!({"layer": id.0, "keepLook": 1})).unwrap_err().to_string().contains("keepLook"));
+    assert_eq!(history_len(&s), n);
+}
+
+#[test]
 fn release_bakes_without_moving_glyphs() {
     let (mut s, id) = session_with_box_text("Hello dynamic world of text", 12.0, [0.0, 0.0, 300.0, 150.0]);
     s.execute("type.convertToDynamicText", json!({"layer": id.0})).unwrap();
