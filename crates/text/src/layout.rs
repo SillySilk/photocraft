@@ -534,6 +534,9 @@ impl Layouter {
         // Box and area text wrap, align within their lines and hide what doesn't fit.
         let wraps = is_box || area.is_some();
         let mut prev_baseline: Option<f32> = None;
+        // The previous line's descent and largest size (px): a solved Dynamic Text line is
+        // stacked from it, so a big line's descenders never reach the smaller line below.
+        let mut prev_line: Option<(f32, f32)> = None;
         let mut pending_space = 0.0f32;
         let mut stop = false;
         // Whether hiding the text from `from` on hides anything but line and paragraph breaks
@@ -824,7 +827,14 @@ impl Layouter {
                     break;
                 }
                 let m = *line.metrics();
-                let LineMetrics { ascent, descent, leading } = line_metrics(&line, &out.styles, &ps, k, first_style, vertical, line_gap);
+                let LineMetrics { ascent, descent, leading, px } = line_metrics(&line, &out.styles, &ps, k, first_style, vertical, line_gap);
+                // Dynamic Text box lines (solved): the previous line's descent, this line's
+                // ascent and the gap, a percentage of the larger of the two sizes. Photoshop's 0%
+                // Line Gap is tight but never collides.
+                let leading = match (solved, line_gap, prev_line) {
+                    (true, Some(gap), Some((prev_descent, prev_px))) => prev_descent + ascent + gap / 100.0 * prev_px.max(px),
+                    _ => leading,
+                };
                 let baseline = match (slot, prev_baseline) {
                     (Some(s), _) => s.baseline,
                     // The first column's right edge touches the box's right edge.
@@ -850,6 +860,7 @@ impl Layouter {
                     break;
                 }
                 prev_baseline = Some(baseline);
+                prev_line = Some((descent, px));
                 let last_line = li + 1 == nlines;
                 let adv = m.advance - m.trailing_whitespace;
 
@@ -1289,11 +1300,13 @@ struct Slot {
 }
 
 /// A line's ascent, descent and leading (px); for area type, the largest over a paragraph.
+/// `px` is the line's largest type size (px), which a solved line's gap is a percentage of.
 #[derive(Clone, Copy, Debug)]
 struct LineMetrics {
     ascent: f32,
     descent: f32,
     leading: f32,
+    px: f32,
 }
 
 /// Most line-breaking passes area type makes for one paragraph, over all its plans (each span
@@ -1497,11 +1510,11 @@ fn line_metrics(
     } else {
         (first_px * 0.8, first_px * 0.2)
     };
+    let px = if max_px > 0.0 { max_px } else { first_px };
     if let Some(gap) = line_gap {
-        let px = if max_px > 0.0 { max_px } else { first_px };
         leading = ascent + descent + gap / 100.0 * px;
     }
-    LineMetrics { ascent, descent, leading }
+    LineMetrics { ascent, descent, leading, px }
 }
 
 /// Largest ascent, descent and leading over the lines of a broken paragraph, by
@@ -1516,8 +1529,8 @@ fn area_metrics(
     line_gap: Option<f32>,
 ) -> LineMetrics {
     layout.lines().map(|line| line_metrics(&line, styles, ps, k, fallback, vertical, line_gap)).fold(
-        LineMetrics { ascent: 0.0, descent: 0.0, leading: 0.0 },
-        |a, b| LineMetrics { ascent: a.ascent.max(b.ascent), descent: a.descent.max(b.descent), leading: a.leading.max(b.leading) },
+        LineMetrics { ascent: 0.0, descent: 0.0, leading: 0.0, px: 0.0 },
+        |a, b| LineMetrics { ascent: a.ascent.max(b.ascent), descent: a.descent.max(b.descent), leading: a.leading.max(b.leading), px: a.px.max(b.px) },
     )
 }
 

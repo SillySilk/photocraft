@@ -2511,8 +2511,9 @@ fn fit_lines_advance_uses_each_lines_scaled_size() {
     t.fit.as_mut().unwrap().line_gap = 100.0;
     let l = layout_of(&t);
     let (l0, l1) = (&l.lines[0], &l.lines[1]);
-    // The second line's leading: its own (scaled) height plus 100% of its scaled size.
-    let want = l1.ascent + l1.descent + 0.5 * 20.0 * l.px_per_pt;
+    // The second line's advance: the big line's (scaled) descent, its own (scaled) ascent and
+    // 100% of the larger scaled size, so the big line's descenders never reach it.
+    let want = l0.descent + l1.ascent + 2.0 * 20.0 * l.px_per_pt;
     assert!((l1.baseline - l0.baseline - want).abs() < 0.5, "{:?}", l.lines);
 }
 

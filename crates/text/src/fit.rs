@@ -344,7 +344,9 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Resu
     };
     let removed = |off: usize| breaks.iter().any(|(&q, &p)| off >= q && off < p);
 
-    // Each line's leading: its natural height as laid out plus the gap, a percent of its largest size.
+    // Each line's leading, as layout stacks solved lines: the previous line's descent, its own
+    // ascent and the gap, a percent of the larger of the two lines' largest sizes. The first
+    // line: its own height plus the gap (it only matters if text is typed above it).
     let mut line_size = vec![0.0f32; lines.len()];
     for w in cuts.windows(2) {
         let Some(run) = runs.get(run_at(w[0])) else { continue };
@@ -354,12 +356,19 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Resu
             *sz = sz.max(scaled_style(&run.style, scale).size_pt);
         }
     }
+    let info_of = |l: &FitLine| fitted.lines.iter().find(|i| i.range.start == l.start as usize);
     let leading: Vec<Option<f32>> = lines
         .iter()
         .zip(&line_size)
-        .map(|(l, &size)| {
-            let info = fitted.lines.iter().find(|i| i.range.start == l.start as usize)?;
-            Some(((info.ascent + info.descent) / k + line_gap / 100.0 * size).clamp(-MAX_PT, MAX_PT * 4.0))
+        .enumerate()
+        .map(|(i, (l, &size))| {
+            let info = info_of(l)?;
+            let prev = i.checked_sub(1).and_then(|p| Some((info_of(&lines[p])?, line_size[p])));
+            let v = match prev {
+                Some((p, prev_size)) => (p.descent + info.ascent) / k + line_gap / 100.0 * size.max(prev_size),
+                None => (info.ascent + info.descent) / k + line_gap / 100.0 * size,
+            };
+            Some(v.clamp(-MAX_PT, MAX_PT * 4.0))
         })
         .collect();
 
@@ -954,17 +963,23 @@ fn width_scale(segs: &[Segment], c: &Cand) -> f32 {
 }
 
 /// Height (px) from the box top to the last line's descent, stacked as layout stacks solved
-/// lines: the first line's ascent, then each line's ascent + descent + line gap (percent of its
-/// largest size), plus paragraph spacing, then the last descent.
+/// lines: the first line's ascent, then for each later line the previous line's descent, its own
+/// ascent and the line gap (percent of the larger of the two lines' sizes), plus paragraph
+/// spacing, then the last descent.
 fn stack(segs: &[Segment], lines: &[Cand], scales: &[f32], line_gap: f32, k: f32) -> f32 {
     let mut h = 0.0f32;
     let n = lines.len();
+    let mut prev: Option<(f32, f32)> = None;
     for (i, (c, &s)) in lines.iter().zip(scales).enumerate() {
         let seg = &segs[c.seg];
         let empty = c.first >= c.end;
         let px = line_pt(segs, c) * k * if empty { 1.0 } else { s };
         let (asc, desc) = (seg.ascent * px, seg.descent * px);
-        h += if i == 0 { asc } else { asc + desc + line_gap * px };
+        h += match prev {
+            None => asc,
+            Some((prev_desc, prev_px)) => prev_desc + asc + line_gap * prev_px.max(px),
+        };
+        prev = Some((desc, px));
         if i + 1 == n {
             h += desc;
         }
@@ -1345,6 +1360,21 @@ mod tests {
         let out = eng.layout(&t, 72.0);
         let b = bottom(&out);
         assert!(!out.hidden && (400.0 * 0.8..=400.5).contains(&b), "block bottom {b}");
+    }
+
+    #[test]
+    fn a_big_line_never_collides_with_the_line_below() {
+        // Each line is stacked from the previous line's descent: a big line's descenders stay
+        // clear of the smaller line under it, even at a 0% line gap.
+        let mut eng = engine();
+        let mut t = fitted_box(CAFE, 24.0, (0.0, 0.0, 500.0, 400.0));
+        refit(&mut eng, &mut t, 72.0);
+        let out = eng.layout(&t, 72.0);
+        assert!(out.lines.len() >= 5);
+        for p in out.lines.windows(2) {
+            let (prev, next) = (&p[0], &p[1]);
+            assert!(next.baseline - next.ascent >= prev.baseline + prev.descent - 0.5, "{prev:?} overlaps {next:?}");
+        }
     }
 
     #[test]
