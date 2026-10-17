@@ -154,6 +154,7 @@ pub fn rich_doc(mode: ColorMode, depth: SampleType) -> Document {
                 word_gap: 25.0,
                 line_gap: -10.0,
                 lines: vec![text::FitLine { start: 0, scale: 2.5 }, text::FitLine { start: 4, scale: 1.25 }],
+                area_scale: 1.0,
             }),
             orientation: text::Orientation::Horizontal,
             antialias: text::AntiAlias::default(),

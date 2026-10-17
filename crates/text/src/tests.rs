@@ -2330,9 +2330,9 @@ b",
         20.0,
         (0.0, 0.0, 400.0, 400.0),
     );
-    t.fit = Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: vec![] });
+    t.fit = Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: vec![], area_scale: 1.0 });
     let l0 = layout_of(&t);
-    t.fit = Some(TextFit { word_gap: 0.0, line_gap: 100.0, lines: vec![] });
+    t.fit = Some(TextFit { word_gap: 0.0, line_gap: 100.0, lines: vec![], area_scale: 1.0 });
     let l1 = layout_of(&t);
     let step = |l: &crate::TextLayout| l.lines[1].baseline - l.lines[0].baseline;
     let px = 20.0 * l0.px_per_pt;
@@ -2348,7 +2348,7 @@ fn word_gap_widens_lines() {
     // The word gap is a percent of each space's own width: +100 % doubles every space.
     let space = l0.clusters.iter().find(|c| c.range.start == 2).map(|c| c.advance).unwrap();
     assert!(space > 1.0 && space < 0.5 * 20.0 * l0.px_per_pt, "a space is narrower than the size: {space}");
-    t.fit = Some(TextFit { word_gap: 100.0, line_gap: 0.0, lines: vec![] });
+    t.fit = Some(TextFit { word_gap: 100.0, line_gap: 0.0, lines: vec![], area_scale: 1.0 });
     let w1 = {
         let l = layout_of(&t);
         l.lines[0].x1 - l.lines[0].x0
@@ -2422,7 +2422,7 @@ fn area_line_gap_spreads_rows() {
     t.shape = TextShape::Area { path: area_poly(&[(0.0, 0.0), (120.0, 0.0), (120.0, 600.0), (0.0, 600.0)]) };
     let step = |gap: f32| {
         let mut t = t.clone();
-        t.fit = Some(TextFit { word_gap: 0.0, line_gap: gap, lines: vec![] });
+        t.fit = Some(TextFit { word_gap: 0.0, line_gap: gap, lines: vec![], area_scale: 1.0 });
         let l = layout_of(&t);
         assert!(l.lines.len() >= 3 && !l.overflowed, "{:?}", l.lines);
         l.lines[1].baseline - l.lines[0].baseline
@@ -2452,7 +2452,12 @@ fn fit_ignores_explicit_and_auto_leading() {
 // Dynamic Text box lines: the solver's `lines` force the breaks and size each line.
 
 fn fit_lines(lines: &[(u32, f32)]) -> Option<TextFit> {
-    Some(TextFit { word_gap: 0.0, line_gap: 0.0, lines: lines.iter().map(|&(start, scale)| photocraft_doc::text::FitLine { start, scale }).collect() })
+    Some(TextFit {
+        word_gap: 0.0,
+        line_gap: 0.0,
+        lines: lines.iter().map(|&(start, scale)| photocraft_doc::text::FitLine { start, scale }).collect(),
+        area_scale: 1.0,
+    })
 }
 
 /// Em sizes (px) of the glyphs sitting on each line's baseline.
