@@ -1,5 +1,5 @@
-//! Dynamic Text: finds the largest uniform scale of a layer's type sizes at which its text still
-//! fits its box or area shape. The only "doesn't fit" signal is `TextLayout::overflowed`.
+//! Dynamic Text: chooses a box or area layer's lines and sizes each one to span its width
+//! (Photoshop's Dynamic Text), and bakes the result into ordinary type.
 
 use photocraft_doc::TextLayer;
 use photocraft_doc::text::{FitLine, TextFit, TextRun, TextShape};
@@ -7,9 +7,6 @@ use photocraft_doc::text::{FitLine, TextFit, TextRun, TextShape};
 pub const MIN_PT: f32 = 0.1;
 pub const MAX_PT: f32 = 1296.0;
 pub const MAX_PROBES: usize = 20;
-
-/// The search stops once the bracket is this tight (ratio of upper to lower scale).
-const TOLERANCE: f32 = 1.001;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FitResult {
@@ -22,67 +19,6 @@ const UNTOUCHED: FitResult = FitResult { scale: 1.0, fits: true, probes: 0 };
 
 fn is_fitted(layer: &TextLayer) -> bool {
     layer.fit.is_some() && !layer.text.is_empty() && matches!(layer.shape, TextShape::Box { .. } | TextShape::Area { .. })
-}
-
-/// Largest uniform scale of every run's size (and `size_pt`) at which `layer` lays out with no
-/// overflow, the sizes staying within MIN_PT..=MAX_PT. Bounded by MAX_PROBES layouts.
-/// Point/Path layers, fit None, or empty text: scale 1, fits true, 0 probes.
-///
-/// The scale stops where the largest run reaches MAX_PT, so at the top end every run keeps its
-/// ratio to the others. At the bottom end the search goes down until the largest run is at
-/// MIN_PT, so the smaller runs clamp at MIN_PT before it: text too long for its shape loses its
-/// size ratios there. That loss can't be avoided, since sizes below MIN_PT don't exist and
-/// stopping earlier would leave the text overflowing.
-///
-/// Callers must refuse vertical text, RTL text and multi-layer input before fitting; this solver
-/// does not check for them.
-pub fn fit_scale(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> FitResult {
-    if !is_fitted(layer) {
-        return UNTOUCHED;
-    }
-    let fallback = sane_fallback(layer);
-    let sizes: Vec<f32> = layer.char_runs().iter().map(|r| sane(r.style.size_pt, fallback).max(MIN_PT)).collect();
-    let max_run = sizes.iter().copied().fold(MIN_PT, f32::max);
-    let (lo, hi) = (MIN_PT / max_run, MAX_PT / max_run);
-
-    let probe_count = std::cell::Cell::new(0);
-    let probe = |engine: &mut crate::TextEngine, scale: f32| {
-        probe_count.set(probe_count.get() + 1);
-        let mut clone = layer.clone();
-        clone.cache = None;
-        clone.psd_raw = None;
-        apply_scale(&mut clone, scale);
-        !engine.layout(&clone, dpi).overflowed
-    };
-
-    // Warm start at the current size, then bisect in log space between the largest scale known
-    // to fit (`low`) and the smallest known to overflow (`high`).
-    let start = 1.0_f32.clamp(lo, hi);
-    let mut best = None;
-    let (mut low, mut high) = (lo, hi);
-    if probe(engine, start) {
-        best = Some(start);
-        low = start;
-    } else {
-        high = start;
-    }
-    while high / low >= TOLERANCE && probe_count.get() < MAX_PROBES {
-        let mid = (low * high).sqrt();
-        if probe(engine, mid) {
-            best = Some(mid);
-            low = mid;
-        } else {
-            high = mid;
-        }
-    }
-    if best.is_none() && probe_count.get() < MAX_PROBES && probe(engine, lo) {
-        best = Some(lo);
-    }
-    let probes = probe_count.get();
-    match best {
-        Some(scale) => FitResult { scale, fits: true, probes },
-        None => FitResult { scale: lo, fits: false, probes },
-    }
 }
 
 /// The layer's own size when finite, else MIN_PT: what a non-finite size is replaced with.
@@ -145,33 +81,31 @@ pub fn apply_scale(layer: &mut TextLayer, scale: f32) {
     }
 }
 
-/// fit_scale then apply_scale for Area text; for Box text, [`solve_box`] written to
-/// `fit.lines`, the sizes left alone (scale 1). Point/Path, fit None or empty text: untouched.
+/// Box text: [`solve_box`] written to `fit.lines`; Area text: [`solve_area`]. The sizes are left
+/// alone (scale 1), and an old file's `area_scale` is kept so toggling off still reverts it.
+/// Point/Path, fit None or empty text: untouched.
 ///
 /// Callers must refuse vertical text, RTL text and multi-layer input before calling.
 pub fn refit(engine: &mut crate::TextEngine, layer: &mut TextLayer, dpi: f32) -> FitResult {
     if !is_fitted(layer) {
         return UNTOUCHED;
     }
-    if matches!(layer.shape, TextShape::Box { .. }) {
-        replace_non_finite(layer);
-        let solved = solve(engine, layer, dpi);
-        if let Some(f) = layer.fit.as_mut() {
-            f.lines = solved.lines;
-        }
-        return FitResult { scale: 1.0, fits: solved.fits, probes: solved.probes };
-    }
-    let result = fit_scale(engine, layer, dpi);
-    apply_scale(layer, result.scale);
+    replace_non_finite(layer);
+    let solved = match layer.shape {
+        TextShape::Box { .. } => solve(engine, layer, dpi),
+        TextShape::Area { .. } => solve_shape(engine, layer, dpi),
+        TextShape::Point | TextShape::Path { .. } => return UNTOUCHED,
+    };
     if let Some(f) = layer.fit.as_mut() {
-        f.area_scale *= result.scale;
+        f.lines = solved.lines;
     }
-    result
+    FitResult { scale: 1.0, fits: solved.fits, probes: solved.probes }
 }
 
-/// Whether `layer` is Dynamic Text box type with solved lines: what [`bake`] turns into plain type.
-pub fn is_fitted_box(layer: &TextLayer) -> bool {
-    layer.fit.as_ref().is_some_and(|f| !f.valid_lines(&layer.text).is_empty()) && matches!(layer.shape, TextShape::Box { .. })
+/// Whether `layer` is Dynamic Text box or area type with solved lines: what [`bake`] turns into
+/// plain type.
+pub fn is_fitted_lines(layer: &TextLayer) -> bool {
+    layer.fit.as_ref().is_some_and(|f| !f.valid_lines(&layer.text).is_empty()) && matches!(layer.shape, TextShape::Box { .. } | TextShape::Area { .. })
 }
 
 /// Whether every glyph of `b` is within 0.5 px of the same glyph of `a`, in order. A fitted
@@ -235,6 +169,13 @@ pub fn has_condensed_type(layer: &TextLayer) -> bool {
 /// exactly, so keeping the space would wrap a word early; the break replaces it and the runs
 /// stay plain. The line gap becomes each line's explicit leading.
 ///
+/// Area text is baked the same way, except that every solved line becomes its own paragraph (a
+/// paragraph break, not a forced line break, ends each line; a forced line break a line follows
+/// becomes one too). Area type plans all the rows of a paragraph with its tallest line, so lines
+/// of different sizes keep their own spacing only as separate paragraphs. Each piece keeps the
+/// paragraph's style, with the first-line indent and space before only on its first piece and
+/// the space after only on its last.
+///
 /// Known limitation: the word gap becomes extra tracking on each space inside a line (read from
 /// the difference in that space's measured advance), an approximation of word spacing: it also
 /// shows if text is typed in front of that space.
@@ -248,15 +189,15 @@ pub fn has_condensed_type(layer: &TextLayer) -> bool {
 /// Condensed type (a run with Horizontal Scale below 100%) is refused before baking with
 /// [`BakeError::Condensed`]: box wrapping measures its unscaled width.
 ///
-/// Anything that is not a fitted box with solved lines (Area text, no lines yet) only loses its
-/// `fit`: Area text already holds its fitted sizes. `engine` measures the layout.
+/// Anything that is not fitted box or area text with solved lines (no lines yet) only loses its
+/// `fit`. `engine` measures the layout.
 pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Result<TextLayer, BakeError> {
     use crate::layout::{FORCED_LINE_BREAK, scaled_style};
     use std::collections::{BTreeMap, BTreeSet};
 
     let mut out = layer.clone();
     let lines: Vec<FitLine> = match &layer.fit {
-        Some(f) if matches!(layer.shape, TextShape::Box { .. }) => f.valid_lines(&layer.text).to_vec(),
+        Some(f) if matches!(layer.shape, TextShape::Box { .. } | TextShape::Area { .. }) => f.valid_lines(&layer.text).to_vec(),
         _ => Vec::new(),
     };
     out.fit = None;
@@ -272,13 +213,20 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Resu
     let (word_gap, line_gap) = layer.fit.as_ref().map_or((0.0, 0.0), TextFit::gaps);
 
     // Where each line break goes: the spaces before a line start (possibly none) become one
-    // forced break, unless the line follows a break already (or nothing).
+    // forced break, unless the line follows a break already (or nothing). Area text: a paragraph
+    // break, which also replaces a forced line break the line follows.
+    let area = matches!(layer.shape, TextShape::Area { .. });
+    let break_char = if area { '\r' } else { FORCED_LINE_BREAK };
     let mut breaks: BTreeMap<usize, usize> = BTreeMap::new();
     for l in lines.iter().skip(1) {
         let p = l.start as usize;
         let mut q = p;
         while q > 0 && text.as_bytes().get(q - 1) == Some(&b' ') {
             q -= 1;
+        }
+        if area && text.get(..q).is_some_and(|s| s.ends_with(FORCED_LINE_BREAK)) && p < text.len() {
+            breaks.insert(q - FORCED_LINE_BREAK.len_utf8(), p);
+            continue;
         }
         if p == 0 || p >= text.len() || text.get(..q).is_none_or(|s| s.is_empty() || s.ends_with(['\r', '\n', FORCED_LINE_BREAK])) {
             continue;
@@ -372,6 +320,36 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Resu
         })
         .collect();
 
+    // Area text: how far (pt) a line sits below where it stacks on the line above (the solver
+    // skipped rows too narrow for it). Its paragraph gets that as extra space before.
+    let para_space = |off: usize, after: bool| {
+        let mut at = 0usize;
+        for p in layer.paragraph_runs() {
+            let end = at.saturating_add(p.len);
+            if off < end || end >= text.len() {
+                let v = if after { p.style.space_after_pt } else { p.style.space_before_pt };
+                return if v.is_finite() { v } else { 0.0 };
+            }
+            at = end;
+        }
+        0.0
+    };
+    let para_starts: BTreeSet<usize> = crate::layout::split_paragraphs(text).iter().map(|r| r.start).collect();
+    let skip: Vec<f32> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if !area || i == 0 {
+                return 0.0;
+            }
+            let (Some(info), Some(prev), Some(Some(lead))) = (info_of(l), info_of(&lines[i - 1]), leading.get(i)) else { return 0.0 };
+            let start = l.start as usize;
+            let spacing = if para_starts.contains(&start) { para_space(lines[i - 1].start as usize, true) + para_space(start, false) } else { 0.0 };
+            let dy = (info.baseline - prev.baseline) / k - lead - spacing;
+            if dy > 1e-3 { dy } else { 0.0 }
+        })
+        .collect();
+
     // The solved lines span the box exactly, and wrapped text breaks a line that is a hair wider
     // than its width: every line shrinks by a margin, the smallest of MARGINS that keeps the
     // fitted line count. Each try is verified; none fitting is an error.
@@ -402,8 +380,8 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Resu
             new_text.push_str(piece);
             let mut len = piece.len();
             if breaks.contains_key(&z) {
-                new_text.push(FORCED_LINE_BREAK);
-                len += FORCED_LINE_BREAK.len_utf8();
+                new_text.push(break_char);
+                len += break_char.len_utf8();
             }
             match new_runs.last_mut() {
                 Some(last) if last.1 == style => last.0 += len,
@@ -419,7 +397,28 @@ pub fn bake(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Resu
         let mut at = 0usize;
         for p in layer.paragraph_runs() {
             let end = at.saturating_add(p.len);
-            new_paras.push(photocraft_doc::text::ParagraphRun { len: moved(end).saturating_sub(moved(at)), style: p.style });
+            // Area text: a piece per paragraph break inserted inside this paragraph.
+            let mut starts = vec![moved(at)];
+            if area {
+                starts.extend(breaks.iter().filter(|&(&q, _)| q >= at && q < end).map(|(_, &p)| moved(p)));
+            }
+            let n = starts.len();
+            for (i, &a) in starts.iter().enumerate() {
+                let z = starts.get(i + 1).copied().unwrap_or_else(|| moved(end));
+                let mut style = p.style.clone();
+                if i > 0 {
+                    style.first_line_indent_pt = 0.0;
+                    style.space_before_pt = 0.0;
+                }
+                if i + 1 < n {
+                    style.space_after_pt = 0.0;
+                }
+                // The line this piece holds: the first solved line starting in it.
+                if area && let Some(li) = lines.iter().position(|l| moved(l.start as usize) >= a && moved(l.start as usize) < z.max(a + 1)) {
+                    style.space_before_pt += skip.get(li).copied().unwrap_or(0.0);
+                }
+                new_paras.push(photocraft_doc::text::ParagraphRun { len: z.saturating_sub(a), style });
+            }
             at = end;
         }
         out.text = new_text;
@@ -465,6 +464,8 @@ struct Word {
     width: f32,
     /// Largest type size among its characters (pt).
     pt: f32,
+    /// Size of its first character (pt): area type finds a paragraph's first row with it.
+    first_pt: f32,
 }
 
 /// Text between mandatory breaks (paragraph breaks and forced line breaks): every segment
@@ -506,6 +507,10 @@ struct Solved {
     /// Base layout lines visited while splitting into segments.
     #[cfg_attr(not(test), expect(dead_code, reason = "read by the bound tests"))]
     visited: usize,
+    /// Area text: each placed line's planned baseline (px), for the tests that check layout
+    /// puts it there.
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the placement tests"))]
+    planned: Vec<f32>,
 }
 
 /// Photoshop Block: lines and per-line scales so each line spans the box width (spec: Behaviour
@@ -530,7 +535,7 @@ pub fn solve_box(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) ->
 }
 
 fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved {
-    let none = Solved { lines: Vec::new(), fits: true, probes: 0, layouts: 0, visited: 0 };
+    let none = Solved { lines: Vec::new(), fits: true, probes: 0, layouts: 0, visited: 0, planned: Vec::new() };
     let TextShape::Box { y: box_y, width, height, .. } = layer.shape else { return none };
     if layer.text.is_empty() || u32::try_from(layer.text.len()).is_err() || !width.is_finite() || !height.is_finite() || !box_y.is_finite() {
         return none;
@@ -574,23 +579,7 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
     // The widest `w` searched: lines may not shrink on average below about 1/MAX_SHRINK_W of the
     // base size. At `hi_w` every segment is one line, in pieces of at most MAX_LINE_WORDS words.
     let w_max = hi_w.min(MAX_SHRINK_W * box_w);
-    let (mut lines, mut scales, h_top) = if w_max >= hi_w {
-        let whole = segs
-            .iter()
-            .enumerate()
-            .flat_map(|(seg, s)| {
-                let n = s.words.len();
-                let starts: Vec<usize> = if n == 0 { vec![0] } else { (0..n).step_by(MAX_LINE_WORDS).collect() };
-                starts.into_iter().map(move |first| {
-                    let end = (first + MAX_LINE_WORDS).min(n);
-                    Cand { seg, first, end, natural: natural(s, first, end) }
-                })
-            })
-            .collect();
-        measure(whole)
-    } else {
-        eval(w_max)
-    };
+    let (mut lines, mut scales, h_top) = if w_max >= hi_w { measure(whole_lines(&segs)) } else { eval(w_max) };
     let mut probes = 1;
     // Too tall even at `w_max`: those lines are kept and layout hides the ones past the bottom.
     if h_top <= box_h && lo_w > 0.0 && lo_w < w_max {
@@ -674,7 +663,281 @@ fn solve(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved 
         scales = next;
     }
     let lines = starts.iter().zip(&scales).map(|(&start, &scale)| FitLine { start, scale }).collect();
-    Solved { lines, fits, probes, layouts, visited }
+    Solved { lines, fits, probes, layouts, visited, planned: Vec::new() }
+}
+
+/// Every segment as one line, in pieces of at most MAX_LINE_WORDS words: the lines at `hi_w`.
+fn whole_lines(segs: &[Segment]) -> Vec<Cand> {
+    segs.iter()
+        .enumerate()
+        .flat_map(|(seg, s)| {
+            let n = s.words.len();
+            let starts: Vec<usize> = if n == 0 { vec![0] } else { (0..n).step_by(MAX_LINE_WORDS).collect() };
+            starts.into_iter().map(move |first| {
+                let end = (first + MAX_LINE_WORDS).min(n);
+                Cand { seg, first, end, natural: natural(s, first, end) }
+            })
+        })
+        .collect()
+}
+
+/// Most lines one area solve places (layout's area row cap).
+const MAX_AREA_LINES: usize = 4096;
+/// Steps of a line's scale bisection in a shape (spec: Solver bounds).
+const AREA_BISECT_STEPS: usize = 12;
+/// Share of its band's widest span a line in a shape is sized to: a hair inside, so layout always
+/// keeps it on the band the solver placed it on.
+pub(crate) const AREA_MARGIN: f32 = 0.999;
+/// Smallest scale a line in a shape may take, as a share of the largest scale placed above it:
+/// rows too narrow for that (tips, tails) are skipped and left empty. 1/MAX_CONTRAST, so the
+/// size steps stay within the contrast the line choice aims for.
+pub(crate) const MIN_ROW_SHARE: f32 = 1.0 / MAX_CONTRAST;
+/// How far a line in a shape moves down per step when its band is too narrow, as a share of
+/// its height at its floor scale.
+pub(crate) const ROW_SKIP_STEP: f32 = 0.05;
+/// Most steps a line in a shape moves down looking for a band that holds it.
+pub(crate) const ROW_SKIP_STEPS: usize = 256;
+
+/// Per-line sizing in a shape (spec: Behaviour 4): lines and per-line scales so each line spans
+/// the widest span of the band it sits on. Empty text, or a path that encloses nothing → empty
+/// Vec. Bounded: ≤ MAX_PROBES placements of the lines, each line's scale bisected in at most
+/// AREA_BISECT_STEPS steps, and at most 1 + REFINE_PASSES layouts.
+///
+/// The line choice is [`solve_box`]'s ([`contrast_breaks`] over the target natural width `w`),
+/// searched up to `min(hi_w, MAX_SHRINK_W · shape width)`, keeping of the probes whose lines all
+/// fit the one that ends lowest. Lines are placed top-down from the shape's top (GUESS) by
+/// [`place_area`]: each at the largest scale whose width fits the widest span of its band
+/// (GUESS: a split row uses its widest span), never below MIN_ROW_SHARE of the largest line
+/// above it (narrower rows are skipped and left empty). The chosen lines are then laid out, each
+/// line's width corrected by what layout measures, and the lines placed again.
+/// Nothing is shrunk to fit the height: when even the widest `w` leaves lines below the shape,
+/// layout hides them and flags the layer overflowed.
+///
+/// Callers must refuse vertical text, RTL text and multi-layer input before solving.
+pub fn solve_area(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Vec<FitLine> {
+    solve_shape(engine, layer, dpi).lines
+}
+
+fn solve_shape(engine: &mut crate::TextEngine, layer: &TextLayer, dpi: f32) -> Solved {
+    let none = Solved { lines: Vec::new(), fits: true, probes: 0, layouts: 0, visited: 0, planned: Vec::new() };
+    let TextShape::Area { path } = &layer.shape else { return none };
+    if layer.text.is_empty() || u32::try_from(layer.text.len()).is_err() {
+        return none;
+    }
+    // A path that encloses nothing lays out as point text: there is nothing to fit.
+    let Some(shape) = crate::area::AreaShape::new(path, false) else { return none };
+    let shape_w = (shape.bounds[2] - shape.bounds[0]).max(1.0);
+    let k = if dpi.is_finite() && dpi > 0.0 { dpi / 72.0 } else { 1.0 };
+    let line_gap = layer.fit.as_ref().map_or(0.0, |f| f.gaps().1) / 100.0;
+
+    // As in `solve`: the layer as the solver lays it out, and its words measured as point text.
+    let mut base = layer.clone();
+    base.cache = None;
+    base.psd_raw = None;
+    replace_non_finite(&mut base);
+    let fit = base.fit.get_or_insert_with(TextFit::default);
+    fit.lines.clear();
+    let mut point = base.clone();
+    point.shape = TextShape::Point;
+    let measured = engine.layout(&point, dpi);
+    let Some((segs, visited)) = segments(&base, &measured, k, shape_w) else {
+        return Solved { fits: false, ..none };
+    };
+    if segs.is_empty() {
+        return none;
+    }
+    let mut layouts = 1;
+
+    // Search `w` as `solve` does, with the shape for the box: a geometric scan from the longest
+    // word up, then a bisection between the last width that doesn't fit and the first that does.
+    // Of every probe whose lines all fit, the one ending lowest is kept (the smaller `w` on a tie).
+    let lo_w = segs.iter().flat_map(|s| s.words.iter().enumerate().map(|(i, w)| if i == 0 { w.lead + w.width } else { w.width })).fold(0.0f32, f32::max);
+    let hi_w = segs.iter().map(|s| natural(s, 0, s.words.len())).fold(lo_w, f32::max);
+    let w_max = hi_w.min(MAX_SHRINK_W * shape_w);
+    let eval = |w: f32| {
+        let lines = if w >= hi_w { whole_lines(&segs) } else { contrast_breaks(&segs, w) };
+        let (scales, fits, bottom, planned) = place_area(&segs, &lines, &shape, line_gap, k, shape_w);
+        (lines, scales, fits, bottom, planned)
+    };
+    let (mut lines, mut scales, fits_top, mut best, mut planned) = eval(w_max);
+    let mut probes = 1;
+    // Not even `w_max` fits: its lines are kept and layout hides the ones past the shape.
+    if fits_top && lo_w > 0.0 && lo_w < w_max {
+        let step = (w_max / lo_w).powf(1.0 / SCAN_PROBES as f32);
+        let (mut lo, mut hi) = (lo_w, w_max);
+        let mut first = true;
+        for i in 0..SCAN_PROBES {
+            let w = lo_w * step.powi(i as i32);
+            let m = eval(w);
+            probes += 1;
+            if m.2 {
+                hi = w;
+                if m.3 >= best {
+                    (lines, scales, _, best, planned) = m;
+                }
+                break;
+            }
+            lo = w;
+            first = false;
+        }
+        if !first {
+            while probes < MAX_PROBES && hi - lo > 0.25 {
+                let mid = 0.5 * (lo + hi);
+                let m = eval(mid);
+                probes += 1;
+                if m.2 {
+                    hi = mid;
+                    if m.3 >= best {
+                        (lines, scales, _, best, planned) = m;
+                    }
+                } else {
+                    lo = mid;
+                }
+            }
+        }
+    }
+
+    // Exact widths: lay the lines out, correct each line's natural width by the visible width
+    // layout measures (kerning, horizontal scale, optical sizes), and place the lines again. A
+    // line's scale moves the rows of every line below it, so the lines are re-placed together
+    // rather than each scaled to its old row. The scales returned are the ones last laid out.
+    let starts: Vec<u32> = lines.iter().map(|c| line_start(&segs, c) as u32).collect();
+    let mut fits = true;
+    for pass in 0..REFINE_PASSES {
+        if let Some(f) = base.fit.as_mut() {
+            f.lines = starts.iter().zip(&scales).map(|(&start, &scale)| FitLine { start, scale }).collect();
+        }
+        let out = engine.layout(&base, dpi);
+        layouts += 1;
+        fits = !out.hidden;
+        let mut changed = false;
+        let mut at = 0;
+        for (i, c) in lines.iter_mut().enumerate() {
+            // Layout lines come in the order of the solved lines; a hidden one is missing.
+            let Some(off) = out.lines.get(at..).and_then(|ls| ls.iter().position(|l| l.range.start == starts[i] as usize)) else { continue };
+            at += off;
+            let l = &out.lines[at];
+            let (advance, want) = (l.x1 - l.x0, c.natural * scales[i]);
+            if c.first >= c.end || advance <= 0.0 || want <= 0.0 || (advance - want).abs() <= WIDTH_EPS {
+                continue;
+            }
+            c.natural *= advance / want;
+            changed = true;
+        }
+        if !changed || pass + 1 == REFINE_PASSES {
+            break;
+        }
+        (scales, _, _, planned) = place_area(&segs, &lines, &shape, line_gap, k, shape_w);
+    }
+    let lines = starts.iter().zip(&scales).map(|(&start, &scale)| FitLine { start, scale }).collect();
+    Solved { lines, fits, probes, layouts, visited, planned }
+}
+
+/// What a line's indents take off its row (px): the paragraph's indents, and on its first line
+/// the first-line indent.
+fn line_inset(segs: &[Segment], c: &Cand, shape_w: f32) -> f32 {
+    (shape_w - line_target(segs, c)).max(0.0)
+}
+
+/// Places `lines` top-down in `shape` as layout places solved area lines (spec: Behaviour 4).
+///
+/// The first line goes on the first row from the shape's top that has a span at least its first
+/// character's size wide (area type's own row search). Each later line starts at the band
+/// stacked on the previous line. Its floor scale is MIN_ROW_SHARE of the largest scale placed
+/// so far, clamped to MIN_PT..=MAX_PT: when the band can't hold the
+/// line at its floor, the line moves down in steps of ROW_SKIP_STEP of its height at the floor,
+/// at most ROW_SKIP_STEPS steps, to the first band that can, so narrow tips and tails stay empty
+/// instead of filling with tiny lines. There its scale is the largest (a log bisection of at most
+/// AREA_BISECT_STEPS steps, from the floor up) whose width fits the band's widest span.
+///
+/// Returns the scales, whether every line fits, the bottom of the last placed line and each
+/// placed line's baseline. A line
+/// with no band left and every line after it keep the last placed line's scale (clamped);
+/// layout hides them.
+fn place_area(segs: &[Segment], lines: &[Cand], shape: &crate::area::AreaShape, line_gap: f32, k: f32, shape_w: f32) -> (Vec<f32>, bool, f32, Vec<f32>) {
+    let mut scales: Vec<f32> = Vec::with_capacity(lines.len());
+    let mut baselines: Vec<f32> = Vec::with_capacity(lines.len());
+    // The previous line's baseline, descent and largest size (px).
+    let mut prev: Option<(f32, f32, f32)> = None;
+    let mut largest = 0.0f32;
+    let mut bottom = shape.bounds[1];
+    for (i, c) in lines.iter().enumerate() {
+        let seg = &segs[c.seg];
+        let empty = c.first >= c.end;
+        let pt = line_pt(segs, c).max(MIN_PT);
+        let spacing = if i > 0 && seg.para_first && c.first == 0 { segs[lines[i - 1].seg].space_after + seg.space_before } else { 0.0 };
+        let inset = line_inset(segs, c, shape_w);
+        // The line at scale `s`, `dy` below its stacked band, when that band is inside the shape
+        // and its widest span holds the line: its baseline, descent and size (px).
+        // The first line goes on the first row from the shape's top with a span at least its
+        // first character's size wide (area type's own row search, so baked text finds it too).
+        let first_pt = line_first_pt(segs, c).max(MIN_PT);
+        let place = |s: f32, dy: f32| -> Option<(f32, f32, f32)> {
+            let px = pt * k * s;
+            let (asc, desc) = (seg.ascent * px, seg.descent * px);
+            let (b, widest) = match prev {
+                None => {
+                    let (b, spans) = shape.next_row(shape.bounds[1] + asc, asc, desc, first_pt * k * s)?;
+                    (b, spans.iter().map(|sp| sp.1 - sp.0).fold(0.0f32, f32::max))
+                }
+                Some((b, prev_desc, prev_px)) => {
+                    let b = dy + b + prev_desc + asc + line_gap * prev_px.max(px) + spacing;
+                    if b + desc > shape.bounds[3] || b.is_nan() {
+                        return None;
+                    }
+                    (b, shape.spans(b - asc, b + desc, 0.0).iter().map(|sp| sp.1 - sp.0).fold(0.0f32, f32::max))
+                }
+            };
+            (widest > 0.0 && (empty || c.natural * s <= AREA_MARGIN * (widest - inset))).then_some((b, desc, px))
+        };
+        let (lo, hi) = (MIN_PT / pt, MAX_PT / pt);
+        let floor = if empty { 1.0 } else { (MIN_ROW_SHARE * largest).clamp(lo, hi) };
+        let step = ROW_SKIP_STEP * (seg.ascent + seg.descent) * pt * k * floor;
+        let found = if i >= MAX_AREA_LINES {
+            None
+        } else if prev.is_none() {
+            // The first line: no floor and no skipping (its row search already skips down).
+            (if empty { place(1.0, 0.0) } else { place(lo, 0.0) }).map(|p| (0.0, p))
+        } else {
+            (0..=ROW_SKIP_STEPS).map(|j| j as f32 * step).find_map(|dy| place(floor, dy).map(|p| (dy, p)))
+        };
+        let placed = found.map(|(dy, p)| {
+            if empty {
+                (1.0, p)
+            } else if let Some(q) = place(hi, dy) {
+                (hi, q)
+            } else {
+                let (mut a, mut z, mut p, mut s) = (floor.ln(), hi.ln(), p, floor);
+                for _ in 0..AREA_BISECT_STEPS {
+                    let mid = 0.5 * (a + z);
+                    match place(mid.exp(), dy) {
+                        Some(q) => {
+                            a = mid;
+                            p = q;
+                            s = mid.exp();
+                        }
+                        None => z = mid,
+                    }
+                }
+                (s, p)
+            }
+        });
+        let Some((s, p)) = placed else {
+            let last = scales.last().copied();
+            for c in &lines[i..] {
+                scales.push(if c.first >= c.end { 1.0 } else { last.map_or_else(|| width_scale(segs, c), |s| clamp_scale(segs, c, s)) });
+            }
+            return (scales, false, bottom, baselines);
+        };
+        scales.push(s);
+        if !empty {
+            largest = largest.max(s);
+        }
+        bottom = p.0 + p.1;
+        baselines.push(p.0);
+        prev = Some(p);
+    }
+    (scales, true, bottom, baselines)
 }
 
 /// Splits the layer into segments of words measured in `m` (the layer laid out as point text).
@@ -741,7 +1004,7 @@ fn segments(t: &TextLayer, m: &crate::TextLayout, k: f32, box_w: f32) -> Option<
                         w.width += pending + adv;
                         w.pt = w.pt.max(pt);
                     }
-                    _ => words.push(Word { start: c.range.start, lead: pending, width: adv, pt }),
+                    _ => words.push(Word { start: c.range.start, lead: pending, width: adv, pt, first_pt: pt_at(c.range.start) }),
                 }
                 pending = 0.0;
                 in_word = true;
@@ -938,10 +1201,20 @@ fn line_target(segs: &[Segment], c: &Cand) -> f32 {
     (s.avail - if first_line { s.first_indent } else { 0.0 }).max(1.0)
 }
 
-/// Largest type size on the line (pt).
+/// Largest type size on the line (pt); an empty line's is its segment's size.
 fn line_pt(segs: &[Segment], c: &Cand) -> f32 {
     let s = &segs[c.seg];
-    s.words.get(c.first..c.end).map_or(s.pt, |ws| ws.iter().map(|w| w.pt).fold(MIN_PT, f32::max))
+    match s.words.get(c.first..c.end) {
+        Some(ws) if !ws.is_empty() => ws.iter().map(|w| w.pt).fold(MIN_PT, f32::max),
+        _ => s.pt,
+    }
+}
+
+/// Size of the line's first character (pt): the segment's at its start (its leading spaces), else
+/// its first word's.
+fn line_first_pt(segs: &[Segment], c: &Cand) -> f32 {
+    let s = &segs[c.seg];
+    if c.first == 0 { s.pt } else { s.words.get(c.first).map_or(s.pt, |w| w.first_pt) }
 }
 
 /// `scale` limited so the line's largest size stays within MIN_PT..=MAX_PT; empty lines keep 1.
@@ -999,14 +1272,6 @@ mod tests {
     use photocraft_doc::text::TextFit;
     const FORCED_BREAK: &str = "\u{3}";
 
-    /// The uniform fit (what Area text uses), applied to any layer: Box text no longer takes it
-    /// through `refit`, but `fit_scale`/`apply_scale` still work on it.
-    fn uniform(e: &mut TextEngine, t: &mut TextLayer) -> FitResult {
-        let r = fit_scale(e, t, 72.0);
-        apply_scale(t, r.scale);
-        r
-    }
-
     fn fit_box(text: &str, size: f32, w: f32, h: f32) -> TextLayer {
         let mut t = box_layer(text, size, (0.0, 0.0, w, h));
         t.fit = Some(TextFit::default());
@@ -1037,72 +1302,44 @@ mod tests {
     }
 
     #[test]
-    fn fitted_box_fits_and_slightly_larger_does_not() {
-        let mut e = TextEngine::new();
-        let mut t = fit_box("The quick brown fox jumps over the lazy dog", 12.0, 300.0, 120.0);
-        let r = uniform(&mut e, &mut t);
-        assert!(r.fits && r.probes <= MAX_PROBES);
-        assert!(!e.layout(&t, 72.0).overflowed);
-        let mut bigger = t.clone();
-        apply_scale(&mut bigger, 1.02);
-        assert!(e.layout(&bigger, 72.0).overflowed, "fit should be tight: {}", t.size_pt);
-    }
-
-    #[test]
-    fn wider_box_gives_bigger_text_and_fewer_lines() {
-        let mut e = TextEngine::new();
-        let text = "one two three four five six seven eight";
-        let mut narrow = fit_box(text, 12.0, 150.0, 300.0);
-        let mut wide = fit_box(text, 12.0, 600.0, 300.0);
-        uniform(&mut e, &mut narrow);
-        uniform(&mut e, &mut wide);
-        assert!(wide.size_pt > narrow.size_pt);
-        assert!(e.layout(&wide, 72.0).lines.len() < e.layout(&narrow, 72.0).lines.len());
-    }
-
-    #[test]
-    fn long_text_bottoms_out_at_minimum() {
-        let mut e = TextEngine::new();
-        let mut t = fit_box(&"word ".repeat(5000), 12.0, 2.0, 2.0);
-        let r = uniform(&mut e, &mut t);
-        assert!(!r.fits && r.probes <= MAX_PROBES);
-        assert!((t.size_pt - MIN_PT).abs() < 1e-4);
-    }
-
-    #[test]
-    fn mixed_sizes_keep_their_ratio() {
-        let mut e = TextEngine::new();
-        let mut t = fit_box("big small", 12.0, 400.0, 200.0);
-        set_run_sizes(&mut t, &[(3, 30.0), (6, 10.0)]); // "big" 30pt, " small" 10pt
-        uniform(&mut e, &mut t);
-        let s: Vec<f32> = t.runs.iter().map(|r| r.style.size_pt).collect();
-        assert!((s[0] / s[1] - 3.0).abs() < 1e-3, "{s:?}");
-    }
-
-    #[test]
-    fn area_ellipse_fits_tightly() {
+    fn area_ellipse_lines_fill_and_fit() {
+        // Was `area_ellipse_fits_tightly` (uniform fit): the text now fits as per-line sizes, the
+        // base size kept, and every line is as big as its row allows.
         let mut e = TextEngine::new();
         let mut t = area_ellipse_layer(&"talk ".repeat(12), 12.0, 260.0, 160.0);
         t.fit = Some(TextFit::default());
         let r = refit(&mut e, &mut t, 72.0);
-        assert!(r.fits && !e.layout(&t, 72.0).overflowed);
+        assert!(r.fits && r.scale == 1.0 && t.size_pt == 12.0, "{r:?}");
+        let out = e.layout(&t, 72.0);
+        assert!(!out.hidden && !out.lines.is_empty());
+        // Any line 2% bigger no longer fits where it is.
         let mut bigger = t.clone();
-        apply_scale(&mut bigger, 1.02);
-        assert!(e.layout(&bigger, 72.0).overflowed);
+        if let Some(f) = bigger.fit.as_mut() {
+            f.lines.iter_mut().for_each(|l| l.scale *= 1.02);
+        }
+        let b = e.layout(&bigger, 72.0);
+        assert!(b.overflowed || b.hidden || b.lines.len() < out.lines.len() || b.lines.iter().zip(&out.lines).any(|(x, y)| x.baseline > y.baseline + 0.5));
     }
 
     #[test]
-    fn area_fit_keeps_run_ratios_at_the_top_end() {
-        // A shape far bigger than the type can grow: the largest run reaches MAX_PT first, and
-        // the smaller one keeps its 1:10 ratio instead of catching up at the clamp.
+    fn area_lines_keep_run_ratios_at_the_top_end() {
+        // Was `area_fit_keeps_run_ratios_at_the_top_end` (uniform fit). A shape far bigger than the
+        // type can grow: the line's largest run stops at MAX_PT and the smaller run on it keeps
+        // its 1:10 ratio instead of catching up at the clamp. One word, so one line.
         let mut e = TextEngine::new();
-        let mut t = area_ellipse_layer("big small", 12.0, 60_000.0, 60_000.0);
-        set_run_sizes(&mut t, &[(3, 10.0), (6, 100.0)]); // "big" 10pt, " small" 100pt
+        let mut t = area_ellipse_layer("bigsmall", 12.0, 60_000.0, 60_000.0);
+        set_run_sizes(&mut t, &[(3, 10.0), (5, 100.0)]); // "big" 10pt, "small" 100pt
         t.fit = Some(TextFit::default());
         refit(&mut e, &mut t, 72.0);
         let s: Vec<f32> = t.runs.iter().map(|r| r.style.size_pt).collect();
-        assert!((s[1] / s[0] - 10.0).abs() < 1e-3, "{s:?}");
-        assert!((s[1] - MAX_PT).abs() < 1.0, "{s:?}");
+        assert_eq!(s, [10.0, 100.0], "base sizes kept");
+        let lines = t.fit.as_ref().unwrap().lines.clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!((lines[0].scale * 100.0 - MAX_PT).abs() < 1.0, "{lines:?}");
+        let out = e.layout(&t, 72.0);
+        let sizes: Vec<f32> = out.glyphs.iter().map(|g| out.faces[g.face as usize].size_px).collect();
+        let (lo, hi) = sizes.iter().fold((f32::MAX, 0.0f32), |(a, b), &v| (a.min(v), b.max(v)));
+        assert!((hi / lo - 10.0).abs() < 1e-2, "{sizes:?}");
     }
 
     #[test]
@@ -1140,18 +1377,6 @@ mod tests {
     }
 
     #[test]
-    fn indents_that_swallow_the_box_scale_down_and_still_fit() {
-        let mut e = TextEngine::new();
-        let mut t = fit_box("one two three four", 12.0, 100.0, 200.0);
-        with_para(&mut t, photocraft_doc::text::ParagraphStyle { start_indent_pt: 60.0, end_indent_pt: 60.0, ..Default::default() });
-        assert!(e.layout(&t, 72.0).overflowed, "unscaled indents leave no room");
-        let r = uniform(&mut e, &mut t);
-        assert!(r.fits && t.size_pt > 1.0, "{r:?} {}", t.size_pt);
-        assert!(!e.layout(&t, 72.0).overflowed);
-        assert!(t.paragraphs[0].style.start_indent_pt < 60.0);
-    }
-
-    #[test]
     fn apply_scale_halves_paragraph_fields_and_keeps_hanging_negative() {
         let mut t = fit_box("ab", 10.0, 100.0, 100.0);
         with_para(
@@ -1178,10 +1403,11 @@ mod tests {
         apply_scale(&mut t, 2.0);
         assert!(t.runs.iter().all(|r| r.style.size_pt.is_finite() && r.style.size_pt >= MIN_PT));
         assert_eq!(t.runs[0].style.size_pt, 20.0);
-        let mut u = fit_box("ab", f32::NAN, 100.0, 100.0);
+        // Neither does the Area solver.
+        let mut u = ellipse_area("ab", f32::NAN);
         set_run_sizes(&mut u, &[(1, f32::NAN), (1, 12.0)]);
-        let r = uniform(&mut e, &mut u);
-        assert!(r.scale.is_finite() && u.size_pt.is_finite() && u.runs.iter().all(|r| r.style.size_pt.is_finite()));
+        let lines = solve_area(&mut e, &u, 72.0);
+        assert!(!lines.is_empty() && lines.iter().all(|l| l.scale.is_finite() && l.scale > 0.0), "{lines:?}");
         // The Box solver never writes sizes, and its scales stay finite on non-finite sizes.
         let mut v = fit_box("ab cd", f32::NAN, 100.0, 100.0);
         set_run_sizes(&mut v, &[(2, f32::NAN), (3, f32::INFINITY)]);
@@ -1392,7 +1618,9 @@ mod tests {
         let words = MAX_DP_WORDS + 900;
         let segs = vec![Segment {
             start: 0,
-            words: (0..words).map(|i| Word { start: i * 5, lead: if i == 0 { 0.0 } else { 4.0 }, width: 20.0 + (i % 7) as f32 * 6.0, pt: 12.0 }).collect(),
+            words: (0..words)
+                .map(|i| Word { start: i * 5, lead: if i == 0 { 0.0 } else { 4.0 }, width: 20.0 + (i % 7) as f32 * 6.0, pt: 12.0, first_pt: 12.0 })
+                .collect(),
             para_first: true,
             ascent: 0.8,
             descent: 0.2,
@@ -1748,13 +1976,14 @@ THREE",
     }
 
     #[test]
-    fn bake_of_unfitted_or_area_text_only_drops_the_fit() {
+    fn bake_of_text_without_solved_lines_only_drops_the_fit() {
         let mut e = TextEngine::new();
         let mut t = box_layer(FOX, 12.0, (0.0, 0.0, 300.0, 100.0));
         assert_eq!(bake(&mut e, &t, 72.0).unwrap(), t);
         t.fit = Some(TextFit::default());
         let b = bake(&mut e, &t, 72.0).unwrap();
         assert!(b.fit.is_none() && b.text == t.text, "no solved lines: nothing to bake");
+        // Area text with no solved lines yet: the same.
         let mut a = area_ellipse_layer("Hello world", 12.0, 200.0, 100.0);
         a.fit = Some(TextFit::default());
         let b = bake(&mut e, &a, 72.0).unwrap();
@@ -1854,5 +2083,233 @@ THREE",
         let baked = bake(&mut e, &t, 72.0).expect("a later margin keeps the lines");
         let bl = e.layout(&baked, 72.0);
         assert_same_look(&fitted, &bl);
+    }
+
+    // Dynamic Text in shapes: per-line sizing (spec: Behaviour 4).
+
+    /// Area type in the polygon `pts`.
+    fn area_layer(text: &str, pt: f32, pts: &[(f64, f64)]) -> TextLayer {
+        crate::tests::area_layer(text, pt, pts)
+    }
+
+    /// A 400×300 ellipse as a 64-point polygon, Dynamic Text on.
+    fn ellipse_area(text: &str, pt: f32) -> TextLayer {
+        let pts: Vec<(f64, f64)> = (0..64)
+            .map(|i| {
+                let a = i as f64 / 64.0 * std::f64::consts::TAU;
+                (200.0 + 200.0 * a.cos(), 150.0 + 150.0 * a.sin())
+            })
+            .collect();
+        let mut t = area_layer(text, pt, &pts);
+        t.fit = Some(TextFit::default());
+        t
+    }
+
+    /// A 400×400 square minus a centred 160×160 square (Combine Shapes: Subtract), Dynamic Text on.
+    fn ring_area(text: &str, pt: f32) -> TextLayer {
+        use photocraft_doc::vector::{Path, PathOp, Subpath};
+        let path = Path::new(vec![
+            Subpath::polygon(&[(0.0, 0.0), (400.0, 0.0), (400.0, 400.0), (0.0, 400.0)]),
+            Subpath::polygon(&[(120.0, 120.0), (280.0, 120.0), (280.0, 280.0), (120.0, 280.0)]).with_op(PathOp::Subtract),
+        ]);
+        let mut t = crate::tests::area_layer(text, pt, &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]);
+        t.shape = TextShape::Area { path };
+        t.fit = Some(TextFit::default());
+        t
+    }
+
+    fn area_shape(t: &TextLayer) -> crate::area::AreaShape {
+        let TextShape::Area { path } = &t.shape else { panic!("not area type") };
+        crate::area::AreaShape::new(path, false).unwrap()
+    }
+
+    fn widest_span(shape: &crate::area::AreaShape, l: &crate::LineInfo) -> f32 {
+        shape.spans(l.baseline - l.ascent, l.baseline + l.descent, 1.0).iter().map(|s| s.1 - s.0).fold(0.0f32, f32::max)
+    }
+
+    #[test]
+    fn area_lines_span_their_rows_and_middle_is_biggest() {
+        let mut eng = engine();
+        let mut t = ellipse_area(CAFE, 12.0);
+        refit(&mut eng, &mut t, 72.0);
+        assert!(t.runs.iter().all(|r| r.style.size_pt == 12.0), "base sizes kept");
+        let lines = t.fit.as_ref().unwrap().lines.clone();
+        assert!(lines.len() >= 4, "{lines:?}");
+        let out = eng.layout(&t, 72.0);
+        let shape = area_shape(&t);
+        for l in &out.lines {
+            let widest = widest_span(&shape, l);
+            assert!((l.x1 - l.x0) <= widest + 1.0 && (l.x1 - l.x0) >= widest * 0.97 - 1.0, "line {} vs row {widest}", l.x1 - l.x0);
+        }
+        // The middle rows are the widest, so the middle lines' rows are taller than the edges'.
+        let h = |l: &crate::LineInfo| l.ascent + l.descent;
+        let n = out.lines.len();
+        let mid = out.lines[n / 3..n - n / 3].iter().map(h).fold(0.0f32, f32::max);
+        assert!(mid > h(&out.lines[0]) && mid > h(&out.lines[n - 1]), "{:?}", out.lines);
+        for g in &out.glyphs {
+            assert!(shape.contains(g.x, g.y), "{g:?}");
+        }
+    }
+
+    #[test]
+    fn area_rectangle_matches_box() {
+        let mut eng = engine();
+        let mut a = area_layer(CAFE, 12.0, &[(0.0, 0.0), (500.0, 0.0), (500.0, 400.0), (0.0, 400.0)]);
+        a.fit = Some(TextFit::default());
+        refit(&mut eng, &mut a, 72.0);
+        let b = solve_box(&mut eng, &fitted_box(CAFE, 12.0, (0.0, 0.0, 500.0, 400.0)), 72.0);
+        let al = &a.fit.as_ref().unwrap().lines;
+        assert_eq!(al.iter().map(|l| l.start).collect::<Vec<_>>(), b.iter().map(|l| l.start).collect::<Vec<_>>());
+        for (x, y) in al.iter().zip(&b) {
+            assert!((x.scale / y.scale - 1.0).abs() < 0.01, "{al:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn area_too_long_hides_rather_than_shrinks() {
+        let mut eng = engine();
+        let mut t = ellipse_area(&CAFE.repeat(30), 12.0);
+        let r = refit(&mut eng, &mut t, 72.0);
+        let out = eng.layout(&t, 72.0);
+        assert!(out.hidden && out.overflowed && !r.fits);
+        // Sizes come from each line's row, not from shrinking the block: the visible lines in the
+        // middle of the ellipse stay near or above the base size.
+        let shown = out.lines.len();
+        assert!(t.fit.as_ref().unwrap().lines[..shown].iter().any(|l| l.scale >= 0.9), "{:?}", t.fit);
+    }
+
+    #[test]
+    fn ring_shape_keeps_glyphs_inside() {
+        // Rows through the hole are split; each line takes the widest span of its band and no
+        // glyph lands in the hole.
+        let mut eng = engine();
+        let mut t = ring_area(CAFE, 12.0);
+        refit(&mut eng, &mut t, 72.0);
+        let out = eng.layout(&t, 72.0);
+        assert!(!out.lines.is_empty());
+        let shape = area_shape(&t);
+        for g in &out.glyphs {
+            assert!(shape.contains(g.x, g.y), "{g:?}");
+        }
+        // No line is wider than its band's widest span (a line can be held smaller by the hole
+        // below it); bands through the hole whose sides can't hold a line at a third of the
+        // largest size are left empty.
+        for l in &out.lines {
+            let widest = widest_span(&shape, l);
+            assert!((l.x1 - l.x0) <= widest + 1.0, "{l:?} vs {widest}");
+        }
+    }
+
+    #[test]
+    fn area_release_bakes_within_half_a_pixel() {
+        let mut eng = engine();
+        let mut t = ellipse_area(CAFE, 12.0);
+        refit(&mut eng, &mut t, 72.0);
+        let baked = bake(&mut eng, &t, 72.0).expect("area bake");
+        assert!(baked.fit.is_none() && matches!(baked.shape, TextShape::Area { .. }));
+        assert!(baked.runs.iter().any(|r| r.style.size_pt != 12.0), "explicit per-line sizes");
+    }
+
+    #[test]
+    fn area_hostile_shapes_finish_within_bounds() {
+        let mut eng = engine();
+        // A 1×1 shape, a 500-character word, empty text and a 4096-anchor path.
+        let mut tiny = area_layer("hello world", 12.0, &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]);
+        tiny.fit = Some(TextFit::default());
+        let s = solve_shape(&mut eng, &tiny, 72.0);
+        assert!(s.probes <= MAX_PROBES && s.layouts <= 1 + REFINE_PASSES);
+        let mut word = ellipse_area(&"w".repeat(500), 12.0);
+        let r = refit(&mut eng, &mut word, 72.0);
+        assert!(r.probes <= MAX_PROBES && word.fit.as_ref().unwrap().lines.iter().all(|l| l.scale.is_finite()));
+        let empty = ellipse_area("", 12.0);
+        assert!(solve_area(&mut eng, &empty, 72.0).is_empty());
+        let pts: Vec<(f64, f64)> = (0..4096)
+            .map(|i| {
+                let a = i as f64 / 4096.0 * std::f64::consts::TAU;
+                (200.0 + 200.0 * a.cos(), 200.0 + 200.0 * (1.0 + 0.1 * (a * 50.0).sin()) * a.sin())
+            })
+            .collect();
+        let mut many = area_layer(CAFE, 12.0, &pts);
+        many.fit = Some(TextFit::default());
+        let s = solve_shape(&mut eng, &many, 72.0);
+        assert!(s.probes <= MAX_PROBES && s.layouts <= 1 + REFINE_PASSES && !s.lines.is_empty());
+    }
+
+    /// The speech bubble of the earlier renders: a rounded 500×350 body with a tail below.
+    fn bubble_area(text: &str, pt: f32) -> TextLayer {
+        use photocraft_doc::vector::{Knot, Path, Subpath};
+        use photocraft_geom::Point;
+        let p = Point::new;
+        let k = |a: (f64, f64), i: (f64, f64), o: (f64, f64)| Knot { anchor: p(a.0, a.1), in_ctrl: p(i.0, i.1), out_ctrl: p(o.0, o.1), smooth: false };
+        let c = |a: (f64, f64)| k(a, a, a);
+        let knots = vec![
+            k((225.0, 75.0), (185.0, 75.0), (225.0, 75.0)),
+            k((575.0, 75.0), (575.0, 75.0), (615.0, 75.0)),
+            k((650.0, 150.0), (650.0, 110.0), (650.0, 150.0)),
+            k((650.0, 350.0), (650.0, 350.0), (650.0, 390.0)),
+            k((575.0, 425.0), (615.0, 425.0), (575.0, 425.0)),
+            c((375.0, 425.0)),
+            c((250.0, 540.0)),
+            c((275.0, 425.0)),
+            k((225.0, 425.0), (225.0, 425.0), (185.0, 425.0)),
+            k((150.0, 350.0), (150.0, 390.0), (150.0, 350.0)),
+            k((150.0, 150.0), (150.0, 150.0), (150.0, 110.0)),
+        ];
+        let mut t = crate::tests::area_layer(text, pt, &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]);
+        t.shape = TextShape::Area { path: Path::new(vec![Subpath { closed: true, knots, op: Default::default() }]) };
+        t.fit = Some(TextFit::default());
+        t
+    }
+
+    const BUBBLE: &str = "Hey! Did you see what Dynamic Text does to a speech bubble?";
+
+    #[test]
+    fn bubble_tail_stays_empty_and_no_line_is_tiny() {
+        let mut eng = engine();
+        for text in [BUBBLE, CAFE] {
+            let mut t = bubble_area(text, 18.0);
+            refit(&mut eng, &mut t, 72.0);
+            let out = eng.layout(&t, 72.0);
+            assert!(!out.lines.is_empty());
+            let lines = &t.fit.as_ref().unwrap().lines;
+            let shown: Vec<f32> = out.lines.iter().filter_map(|l| lines.iter().find(|f| f.start as usize == l.range.start)).map(|f| f.scale).collect();
+            // Each line is at least MIN_ROW_SHARE of the largest line above it.
+            let mut largest = 0.0f32;
+            for &v in &shown {
+                assert!(v >= MIN_ROW_SHARE * largest * 0.999, "{shown:?}");
+                largest = largest.max(v);
+            }
+            // The body ends at y = 425; the tail below it holds no line.
+            for l in &out.lines {
+                assert!(l.baseline + l.descent <= 425.5, "{l:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn layout_puts_each_area_line_where_the_solver_planned_it() {
+        let mut eng = engine();
+        for t in [ellipse_area(CAFE, 12.0), bubble_area(BUBBLE, 18.0), bubble_area(CAFE, 18.0), ring_area(CAFE, 12.0), ellipse_area(&CAFE.repeat(30), 12.0)] {
+            let s = solve_shape(&mut eng, &t, 72.0);
+            let mut t = t;
+            t.fit.as_mut().unwrap().lines = s.lines.clone();
+            let out = eng.layout(&t, 72.0);
+            assert!(!out.lines.is_empty());
+            for l in &out.lines {
+                let i = s.lines.iter().position(|f| f.start as usize == l.range.start).unwrap();
+                let planned = s.planned.get(i).copied().unwrap_or(f32::NAN);
+                assert!((l.baseline - planned).abs() <= 1.0, "line {i}: laid out at {} planned {planned}", l.baseline);
+            }
+        }
+    }
+
+    #[test]
+    fn area_bubble_release_bakes_within_half_a_pixel() {
+        let mut eng = engine();
+        let mut t = bubble_area(CAFE, 18.0);
+        refit(&mut eng, &mut t, 72.0);
+        let baked = bake(&mut eng, &t, 72.0).expect("area bake");
+        assert!(baked.fit.is_none() && matches!(baked.shape, TextShape::Area { .. }));
+        assert!(baked.paragraph_runs().len() > 1, "a paragraph per line");
     }
 }
