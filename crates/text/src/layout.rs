@@ -537,8 +537,6 @@ impl Layouter {
         // The previous line's descent and largest size (px): a solved Dynamic Text line is
         // stacked from it, so a big line's descenders never reach the smaller line below.
         let mut prev_line: Option<(f32, f32)> = None;
-        // Largest scale of the solved area lines placed so far (see `place_solved_area`).
-        let mut solved_max = 0.0f32;
         let mut pending_space = 0.0f32;
         let mut stop = false;
         // Whether hiding the text from `from` on hides anything but line and paragraph breaks
@@ -769,9 +767,8 @@ impl Layouter {
                 layout.break_all_lines(None);
                 let m = area_metrics(layout, &out.styles, &ps, k, first_style, vertical, line_gap);
                 if solved {
-                    let largest = (!content.chars().all(char::is_whitespace)).then_some(solved_max);
                     let first = prev_baseline.is_none().then_some(first_px);
-                    return place_solved_area(layout, a, area_from(m), m, unit.scale, largest, first, k, (indent_start, indent_end), first_indent);
+                    return place_solved_area(layout, a, area_from(m), m, first, (indent_start, indent_end), first_indent);
                 }
                 break_area(layout, a, area_from(m), m, (indent_start, indent_end), first_px, &area_budget)
             };
@@ -874,9 +871,6 @@ impl Layouter {
                 }
                 prev_baseline = Some(baseline);
                 prev_line = Some((descent, px));
-                if solved && area.is_some() && !content.chars().all(char::is_whitespace) {
-                    solved_max = solved_max.max(unit.scale);
-                }
                 let last_line = li + 1 == nlines;
                 let adv = m.advance - m.trailing_whitespace;
 
@@ -1444,12 +1438,12 @@ fn break_area(
     }
 }
 
-/// Places one solved Dynamic Text area line (laid out unwrapped in `layout`, at `scale`), as
-/// [`crate::fit::solve_area`] planned it. The first line takes the first row area type's row
-/// search finds from `from` (a span at least `first` wide). A later line goes from the baseline
-/// `from` (stacked on the previous line) down in steps of ROW_SKIP_STEP of its height at its
-/// floor scale, at most ROW_SKIP_STEPS steps, to the first band whose widest span
-/// holds the line. It goes in the first span, left to right, that holds it. No band left: no slot
+/// Places one solved Dynamic Text area line (laid out unwrapped in `layout`, at its solved
+/// scale), as [`crate::fit::solve_area`] planned it. The line starts at the baseline `from`
+/// (stacked on the previous line), or for the first line at the first row area type's row
+/// search finds from `from` (a span at least `first` wide), and goes down in steps of
+/// ROW_SKIP_STEP of its height, at most ROW_SKIP_STEPS steps, to the first band whose widest
+/// span holds the line. It goes in the first span, left to right, that holds it. No band left: no slot
 /// (the line is hidden, never drawn past the shape).
 #[allow(clippy::too_many_arguments)]
 fn place_solved_area(
@@ -1457,45 +1451,30 @@ fn place_solved_area(
     area: &crate::area::AreaShape,
     from: f32,
     m: LineMetrics,
-    scale: f32,
-    // The largest scale of the solved lines above, or None for an empty line, which steps by
-    // its own height.
-    largest: Option<f32>,
     // The first line: its first character's size (px), the row search's least span width.
     first: Option<f32>,
-    k: f32,
     indents: (f32, f32),
     first_indent: f32,
 ) -> (Vec<Slot>, bool) {
-    use crate::fit::{AREA_MARGIN, MAX_PT, MIN_PT, MIN_ROW_SHARE, ROW_SKIP_STEP, ROW_SKIP_STEPS};
+    use crate::fit::{AREA_MARGIN, ROW_SKIP_STEP, ROW_SKIP_STEPS};
     let inset = indents.0 + indents.1;
     let width = layout.lines().next().map_or(0.0, |l| l.metrics().advance - l.metrics().trailing_whitespace);
-    let h = m.ascent + m.descent;
-    // The line's height at its floor scale: the floor clamped as the solver clamps it.
-    // The floor as the solver sets it: MIN_ROW_SHARE of the largest scale above.
-    let step = ROW_SKIP_STEP
-        * match largest {
-            Some(largest) if scale > 0.0 && m.px > 0.0 => {
-                let pt = m.px / (k * scale);
-                h / scale * (MIN_ROW_SHARE * largest).clamp(MIN_PT / pt, MAX_PT / pt)
+    let step = ROW_SKIP_STEP * (m.ascent + m.descent);
+    // The first line starts at area type's own row search.
+    let row = match first {
+        Some(min_width) => area.next_row(from, m.ascent, m.descent, min_width),
+        None => Some((from, Vec::new())),
+    };
+    for i in 0..=ROW_SKIP_STEPS {
+        let Some((from, ref row_spans)) = row else { break };
+        let (b, spans) = if i == 0 && first.is_some() {
+            (from, row_spans.clone())
+        } else {
+            let b = from + i as f32 * step;
+            if b + m.descent > area.bounds[3] || b.is_nan() {
+                break;
             }
-            _ => h,
-        };
-    // The first line: area type's own row search, and no skipping.
-    let steps = if first.is_some() { 0 } else { ROW_SKIP_STEPS };
-    for i in 0..=steps {
-        let (b, spans) = match first {
-            Some(min_width) => match area.next_row(from, m.ascent, m.descent, min_width) {
-                Some(row) => row,
-                None => break,
-            },
-            None => {
-                let b = from + i as f32 * step;
-                if b + m.descent > area.bounds[3] || b.is_nan() {
-                    break;
-                }
-                (b, area.spans(b - m.ascent, b + m.descent, 0.0))
-            }
+            (b, area.spans(b - m.ascent, b + m.descent, 0.0))
         };
         let widest = spans.iter().map(|s| s.1 - s.0).fold(0.0f32, f32::max);
         if widest <= 0.0 || width > AREA_MARGIN * (widest - inset - first_indent) + 0.1 {
