@@ -274,6 +274,44 @@ fn box_text_wraps_inside_width() {
     assert_eq!(l2.lines.len(), 2);
 }
 
+/// #5565: paragraph text breaks at its horizontally scaled width. At 60% it breaks like 100%
+/// text in a box 1/0.6 as wide, and the lines fill the box instead of wrapping early.
+#[test]
+fn horizontal_scale_breaks_paragraph_lines_at_the_scaled_width() {
+    let mut e = TextEngine::new();
+    let text = "The quick brown fox jumps over the lazy dog again and again until the paragraph wraps";
+    let boxed = |scale: f32, width: f32, align: TextAlign| {
+        let style = CharStyle { font_family: "Inter".into(), size_pt: 12.0, horizontal_scale: scale, ..Default::default() };
+        let t = TextLayer { shape: TextShape::Box { x: 10.0, y: 0.0, width, height: 1000.0 }, ..styled(text, style) };
+        with_para(t, ParagraphStyle { align, ..Default::default() })
+    };
+    let ranges = |l: &crate::TextLayout| l.lines.iter().map(|ln| ln.range.clone()).collect::<Vec<_>>();
+    for scale in [0.6f32, 1.5] {
+        let scaled = e.layout(&boxed(scale, 120.0, TextAlign::Left), 72.0);
+        let plain = e.layout(&boxed(1.0, 120.0 / scale, TextAlign::Left), 72.0);
+        assert!(scaled.lines.len() > 1, "{scale}");
+        assert_eq!(ranges(&scaled), ranges(&plain), "{scale}: same breaks as unscaled text in the widened box");
+        for (li, ln) in scaled.lines.iter().enumerate() {
+            assert!(ln.x0 >= 10.0 - 1e-3 && ln.x1 <= 130.0 + 1e-3, "{scale}: {ln:?}");
+            // The extent ends at the last glyph, not after the scaled trailing space.
+            let ink = scaled.clusters.iter().filter(|c| c.line == li && !text[c.range.clone()].trim().is_empty());
+            assert!((ink.map(|c| c.x + c.advance).fold(0.0, f32::max) - ln.x1).abs() < 0.01, "{scale}: {ln:?}");
+        }
+    }
+    // At 60% the lines use the box: the first would not fit at 100%.
+    let scaled = e.layout(&boxed(0.6, 120.0, TextAlign::Left), 72.0);
+    assert!(scaled.lines[0].x1 > 110.0, "{:?}", scaled.lines[0]);
+    // Centred and right-aligned lines are placed by their scaled width.
+    let c = e.layout(&boxed(0.6, 120.0, TextAlign::Center), 72.0);
+    for ln in &c.lines {
+        assert!(((ln.x0 + ln.x1) * 0.5 - 70.0).abs() < 0.5, "{ln:?}");
+    }
+    let r = e.layout(&boxed(0.6, 120.0, TextAlign::Right), 72.0);
+    for ln in &r.lines {
+        assert!((ln.x1 - 130.0).abs() < 0.5, "{ln:?}");
+    }
+}
+
 #[test]
 fn alignment_point_and_box() {
     let mut e = TextEngine::new();
@@ -2289,9 +2327,10 @@ fn box_overflow_is_reported() {
 }
 
 #[test]
-fn too_wide_word_is_overflow() {
-    let t = box_layer("Supercalifragilistic", 48.0, (0.0, 0.0, 60.0, 400.0));
-    assert!(layout_of(&t).overflowed);
+fn too_wide_word_breaks_and_is_not_overflow() {
+    // Broken at the box edge (#6694), the word fits a tall enough box.
+    let l = layout_of(&box_layer("Supercalifragilistic", 48.0, (0.0, 0.0, 60.0, 2000.0)));
+    assert!(l.lines.len() > 1 && !l.overflowed, "{:?}", l.lines);
 }
 
 #[test]
@@ -2372,12 +2411,13 @@ fn hanging_first_line_indent_that_fits_is_not_overflow() {
 }
 
 #[test]
-fn first_word_too_wide_for_a_positive_first_line_indent_is_overflow() {
+fn first_word_too_wide_for_a_positive_first_line_indent_breaks_inside_the_box() {
+    // The word is broken at the indented box edge (#6694), so nothing overflows.
     let t = box_layer("Wonderfulness is a long word", 12.0, (0.0, 0.0, 200.0, 1000.0));
     let t = with_para(t, ParagraphStyle { first_line_indent_pt: 150.0, ..Default::default() });
     let l = layout_of(&t);
-    assert!(l.lines[0].x1 - l.lines[0].x0 > 50.5, "{:?}", l.lines[0]);
-    assert!(l.overflowed);
+    assert!(l.lines[0].x1 <= 200.5, "{:?}", l.lines[0]);
+    assert!(!l.overflowed, "{:?}", l.lines);
 }
 
 #[test]
@@ -2387,8 +2427,8 @@ fn horizontal_scale_does_not_count_as_overflow() {
     t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 200.0, height: 1000.0 };
     let l = layout_of(&t);
     assert!(l.lines.len() >= 2);
-    assert!(width(&l) > 200.5, "the scaled lines spill past the box, as before: {:?}", l.lines);
-    assert!(!l.overflowed, "parley wrapped every line inside the box");
+    assert!(width(&l) <= 200.5, "lines break at the scaled width (#5565): {:?}", l.lines);
+    assert!(!l.overflowed, "every line is inside the box");
 }
 
 #[test]
@@ -2677,10 +2717,44 @@ fn hidden_reports_text_past_the_box_or_shape() {
     assert!(l.hidden && l.overflowed);
     let l = layout_of(&box_layer("one two three four five six seven eight nine ten", 24.0, (0.0, 0.0, 120.0, 40.0)));
     assert!(l.hidden && l.overflowed);
-    let l = layout_of(&box_layer("Supercalifragilistic", 48.0, (0.0, 0.0, 60.0, 400.0)));
-    assert!(l.overflowed && !l.hidden, "too wide, nothing hidden");
+    let l = layout_of(&box_layer("Supercalifragilistic", 48.0, (0.0, 0.0, 60.0, 2000.0)));
+    assert!(!l.overflowed && !l.hidden, "a word too wide breaks at the box edge (#6694)");
     let l = layout_of(&area_ellipse_layer(&"word ".repeat(200), 18.0, 200.0, 120.0));
     assert!(l.hidden && l.overflowed);
     let l = layout_of(&box_layer("alpha beta gamma delta\n", 20.0, (0.0, 0.0, 150.0, 40.0)));
     assert!(!l.hidden && !l.overflowed, "an empty last paragraph is not hidden text");
+}
+
+/// A word wider than its paragraph box wraps at the box edge instead of running past it (#6694);
+/// a normal break opportunity still wins, and a box that fits the word lays out exactly as before.
+#[test]
+fn a_word_wider_than_the_paragraph_box_breaks_at_the_box_edge() {
+    let mut e = TextEngine::new();
+    let word = "BLOQUEADO?!";
+    let alone = e.layout(&point(word, 12.0), 72.0);
+    assert_eq!(alone.lines.len(), 1, "{:?}", alone.lines);
+    let word_width = width(&alone);
+    let narrow = 30.0;
+    assert!(word_width > narrow * 2.0, "{word_width}");
+
+    let mut t = point(word, 12.0);
+    t.shape = TextShape::Box { x: 0.0, y: 0.0, width: narrow, height: 200.0 };
+    let l = e.layout(&t, 72.0);
+    assert!(l.lines.len() >= 2, "{:?}", l.lines);
+    for line in &l.lines {
+        assert!(line.x1 <= narrow + 0.5, "{line:?}");
+    }
+    let joined: String = l.lines.iter().map(|l| &word[l.range.clone()]).collect();
+    assert_eq!(joined, word);
+
+    t.shape = TextShape::Box { x: 0.0, y: 0.0, width: word_width + 20.0, height: 200.0 };
+    let fits = e.layout(&t, 72.0);
+    assert_eq!(fits.lines.len(), 1, "{:?}", fits.lines);
+    assert!((width(&fits) - word_width).abs() < 0.01, "{} vs {word_width}", width(&fits));
+
+    let mut spaced = point("ab cd", 12.0);
+    spaced.shape = TextShape::Box { x: 0.0, y: 0.0, width: narrow, height: 200.0 };
+    let l = e.layout(&spaced, 72.0);
+    assert_eq!(l.lines.len(), 2, "{:?}", l.lines);
+    assert_eq!(l.lines[1].range.start, 3, "{:?}", l.lines);
 }
