@@ -298,6 +298,29 @@ pub fn hdr_toning(px: &mut [[f32; 4]], w: usize, h: usize, p: &HdrToning) {
 mod tests {
     use super::*;
 
+    /// #6278: the Result swatch is the sampled colour after the shift, and a picked Result sets
+    /// the sliders that give it.
+    #[test]
+    fn replace_color_result_and_shift_round_trip() {
+        let from = [0.8, 0.2, 0.2];
+        // The shift is in whole slider units, so the round trip is as close as those allow.
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.02);
+        assert!(near(replace_color_result(from, 0.0, 0.0, 0.0), from), "no shift, no change");
+        for to in [[0.2, 0.3, 0.9], [0.9, 0.85, 0.1], [0.4, 0.1, 0.1], [0.95, 0.6, 0.6], [0.1, 0.6, 0.3]] {
+            let [h, s, l] = replace_color_shift(from, to);
+            assert!((-180.0..=180.0).contains(&h) && (-100.0..=100.0).contains(&s) && (-100.0..=100.0).contains(&l));
+            assert!(near(replace_color_result(from, h, s, l), to), "{to:?}: ({h}, {s}, {l}) gives {:?}", replace_color_result(from, h, s, l));
+        }
+        // Red to blue turns the short way (−120°, not +240°).
+        assert!((replace_color_shift([1.0, 0.0, 0.0], [0.0, 0.0, 1.0])[0] + 120.0).abs() < 0.5);
+        // A grey target: saturation all the way down, the hue left alone.
+        let [h, s, _] = replace_color_shift(from, [0.5, 0.5, 0.5]);
+        assert_eq!((h, s), (0.0, -100.0));
+        // Black has no saturation to raise: the slider stays put rather than dividing by zero.
+        let [h, s, l] = replace_color_shift([0.0, 0.0, 0.0], [0.2, 0.6, 0.3]);
+        assert!(h.is_finite() && s.is_finite() && l > 0.0);
+    }
+
     fn ramp(w: usize, h: usize) -> Vec<[f32; 4]> {
         (0..w * h)
             .map(|i| {
