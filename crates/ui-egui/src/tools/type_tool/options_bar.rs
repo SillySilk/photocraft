@@ -3,7 +3,7 @@ use super::dynamic_text::{dynamic_text_toggle, is_fitted};
 use super::editing::{cancel, commit_with};
 use super::fonts::{font_picker, fonts_ready, selected_style, style_label, styles};
 use super::keys::is_vertical;
-use super::*;
+use super::{Color32, LayerId, PhotocraftApp, Stroke, byte_of, json, text_layer};
 
 /// Photoshop's Type options bar.
 pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {

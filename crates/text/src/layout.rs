@@ -17,36 +17,33 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use parley::{
-    Alignment, AlignmentOptions, FontData, FontFamily, FontFeatures, FontStyle, FontVariations, FontWeight, IndentOptions, Layout, LayoutContext,
-    PositionedLayoutItem, StyleProperty, TextWrapMode,
-};
+use parley::{FontData, FontFamily, FontFeatures, FontStyle, FontVariations, FontWeight, Layout, LayoutContext, PositionedLayoutItem, StyleProperty};
 use photocraft_doc::TextLayer;
-use photocraft_doc::text::{Caps, CharStyle, FitLine, FontBaseline, Kerning, Orientation, ParagraphStyle, TextAlign, TextDirection, TextFit, TextShape};
+use photocraft_doc::text::{Caps, CharStyle, FitLine, FontBaseline, Kerning, Orientation, ParagraphStyle, TextFit, TextShape};
 use skrifa::raw::types::Tag;
 
 use crate::fonts::FontDb;
 
 mod area;
+mod lines;
 mod navigate;
 mod paragraphs;
+mod shaping;
 mod style;
 mod vertical;
 
 #[cfg(test)]
 pub(crate) use area::AREA_PASSES;
-use area::{LineMetrics, MAX_AREA_PASSES, area_metrics, break_area, line_metrics, place_solved_area};
 pub use navigate::{byte_index, char_index, hit_char, line_edge, line_index, line_step, text_point_inside, word_boundary};
 pub use paragraphs::{DEFAULT_TAB_STOP_PT, split_paragraphs};
-use paragraphs::{next_tab_stop, strip_break, tab_widths};
+use paragraphs::{next_tab_stop, strip_break};
+use shaping::{Para, resolve_run_styles, running_starts, small_caps_modes};
+use style::SmallCapsMode;
 #[cfg(test)]
-use style::{SMCP_PROBES, variation_list};
-use style::{
-    SYNTHETIC_SMALL_CAPS_SCALE, SmallCapsMode, drawn_style, effective_horizontal_scale, feature_list, first_ascent, probe_smcp, small_caps_mode, style_props,
-};
+use style::{SMCP_PROBES, feature_list, small_caps_mode, variation_list};
+#[cfg(test)]
 pub(crate) use style::{hangul_runs, squeeze_punctuation, synthetic_bold};
 pub use vertical::{VClass, vertical_class};
-use vertical::{VGlyph, VMetrics};
 
 /// Index of the run containing byte offset `off`, given each run's start offset (non-decreasing):
 /// the last run starting at or before `off`, or 0 when none does. Binary search, so a layer with
@@ -285,29 +282,6 @@ pub(crate) struct Layouter {
     optical: crate::optical::Cache,
 }
 
-/// A cluster of a line in visual order, for kerning.
-struct KernSlot {
-    /// Index of the run in the paragraph layout.
-    run: usize,
-    /// Byte offset in the paragraph text.
-    start: usize,
-    first: Option<u32>,
-    last: Option<u32>,
-    font: FontData,
-    coords: Vec<i16>,
-    size: f32,
-    rtl: bool,
-    blank: bool,
-    /// Advance along the line (px, horizontal scale included).
-    advance: f32,
-    /// What horizontal scale adds to the shaped advance (px; negative below 100%).
-    growth: f32,
-    /// A tab, shaped as a space; it advances to the next tab stop.
-    tab: bool,
-    /// Vertical type, upright glyph (its outline doesn't run along the column).
-    upright: bool,
-}
-
 impl Layouter {
     pub fn new() -> Self {
         Self { lcx: LayoutContext::new(), optical: crate::optical::Cache::default() }
@@ -323,48 +297,9 @@ impl Layouter {
         let gaps = t.fit.as_ref().map(TextFit::gaps);
         let line_gap = gaps.map(|(_, line)| line);
         let mut out = TextLayout { px_per_pt: k, vertical, ..Default::default() };
-        // Resolve families (PostScript names from PSDs, unknown families).
-        for r in &runs {
-            let mut s = r.style.clone();
-            if let Some(ps) = s.postscript_name.clone()
-                && !fonts.faces(&s.font_family).iter().any(|f| f.postscript_name.as_deref() == Some(&ps))
-            {
-                let f = fonts.resolve_postscript(&ps);
-                // An exact face match wins; a guessed family only fills a missing family.
-                if f.exact || (!fonts.has_family(&s.font_family) && fonts.has_family(&f.family)) {
-                    s.font_family = f.family;
-                    s.weight = f.weight;
-                    s.italic = f.italic;
-                }
-            }
-            // Drawn with a fallback for now; a host that serves this family fetches it (`served`).
-            if !fonts.has_family(&s.font_family) {
-                crate::served::request(&s.font_family);
-            }
-            fonts.select_named_face(&mut s);
-            drawn_style(&mut s);
-            out.styles.push(s);
-        }
-        let run_starts: Vec<usize> = runs
-            .iter()
-            .scan(0, |a, r| {
-                let s = *a;
-                *a += r.len;
-                Some(s)
-            })
-            .collect();
-        let style_at = |off: usize| run_index_at(&run_starts, off);
-        let para_starts: Vec<usize> = paras
-            .iter()
-            .scan(0, |a, r| {
-                let s = *a;
-                *a += r.len;
-                Some(s)
-            })
-            .collect();
-        let para_style_at = |off: usize| &paras[para_starts.iter().rposition(|&s| s <= off).unwrap_or(0)].style;
-
-        let text = &t.text;
+        let styles = resolve_run_styles(fonts, &runs);
+        let run_starts = running_starts(runs.iter().map(|r| r.len));
+        let para_starts = running_starts(paras.iter().map(|r| r.len));
         let (box_rect, is_box) = match t.shape {
             TextShape::Box { x, y, width, height } => ((x, y, width, height), true),
             // Path text is laid out as one point-text line, then bent onto the path. Area text
@@ -377,28 +312,9 @@ impl Layouter {
             TextShape::Area { path } => crate::area::AreaShape::new(path, vertical),
             _ => None,
         };
-        // Box and area text wrap, align within their lines and hide what doesn't fit.
-        let wraps = is_box || area.is_some();
-        let mut prev_baseline: Option<f32> = None;
-        // The previous line's descent and largest size (px): a solved Dynamic Text line is
-        // stacked from it, so a big line's descenders never reach the smaller line below.
-        let mut prev_line: Option<(f32, f32)> = None;
-        let mut pending_space = 0.0f32;
-        let mut stop = false;
-        // Whether hiding the text from `from` on hides anything but line and paragraph breaks
-        // (an empty last paragraph below the box is not overflow).
-        let hides_text = |from: usize| t.text.get(from..).is_none_or(|r| r.chars().any(|c| !matches!(c, '\r' | '\n' | FORCED_LINE_BREAK)));
-        // Fixed for the whole layout, and the font probe only matters for styles that use small
-        // caps. A real `smcp` substitution must receive lowercase source text; only the fallback
-        // path uppercases it and scales it down.
-        let small_caps: Vec<SmallCapsMode> = out
-            .styles
-            .iter()
-            .map(|style| match style.caps {
-                Caps::SmallCaps => small_caps_mode(style.caps, probe_smcp(fonts, style)),
-                _ => SmallCapsMode::None,
-            })
-            .collect();
+        // Fixed for the whole layout and indexed by run (never by a scaled copy below).
+        let small_caps = small_caps_modes(fonts, &styles);
+        let text = t.text.as_str();
         // Dynamic Text lines (the fit solver's output): each line starts where the solver chose
         // and is laid out at its own scale, without wrapping. Empty until the first refresh
         // solves them; point and path text don't use them.
@@ -406,16 +322,62 @@ impl Layouter {
             Some(f) if is_box || area.is_some() => f.valid_lines(text),
             _ => &[],
         };
-        let solved = !fit_lines.is_empty();
+        let units = break_units(text, fit_lines);
+        // Each unit's style for each run: its own, or for a solved line not at scale 1, a copy at
+        // that line's scale (appended to the styles, so render reads the scaled baseline shift).
+        // Only runs the unit touches are copied; `unit_styles[u][i]` is run `first_run + i`.
+        let mut styles = styles;
+        let unit_styles: Vec<Vec<usize>> = units
+            .iter()
+            .map(|unit| {
+                if unit.scale == 1.0 {
+                    return Vec::new();
+                }
+                let first_run = run_index_at(&run_starts, unit.range.start);
+                let end = run_starts.partition_point(|&s| s < unit.content_end).max(first_run + 1).min(runs.len());
+                (first_run..end)
+                    .map(|ri| {
+                        let (rs, re) = (run_starts[ri], run_starts[ri] + runs[ri].len);
+                        let touches = ri == first_run || (rs < unit.content_end && re > unit.range.start);
+                        match styles.get(ri) {
+                            Some(st) if touches => {
+                                let scaled = scaled_style(st, unit.scale);
+                                styles.push(scaled);
+                                styles.len() - 1
+                            }
+                            _ => ri,
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let env = Env {
+            text,
+            runs: &runs,
+            styles: &styles,
+            run_starts: &run_starts,
+            small_caps: &small_caps,
+            k,
+            vertical,
+            is_box,
+            // Box and area text wrap, align within their lines and hide what doesn't fit.
+            wraps: is_box || area.is_some(),
+            box_rect,
+            area,
+            solved: !fit_lines.is_empty(),
+            line_gap,
+            word_gap: gaps.map(|(word, _)| word),
+        };
+        let mut flow = Flow::default();
         // Per paragraph, shared by its units: its index, the font fallback stack and, for a
         // paragraph split into solved lines, its first strong direction.
         let mut para_cache: Option<(usize, Vec<String>, Option<bool>)> = None;
-        for unit in break_units(text, fit_lines) {
-            if stop {
+        for (unit, unit_style) in units.iter().zip(unit_styles) {
+            if flow.stop {
                 break;
             }
-            let (pi, prange, content_end) = (unit.paragraph, unit.range.clone(), unit.content_end);
-            let ps = para_style_at(prange.start).clone();
+            let pi = unit.paragraph;
+            let ps = paras[para_starts.iter().rposition(|&s| s <= unit.range.start).unwrap_or(0)].style.clone();
             if para_cache.as_ref().is_none_or(|c| c.0 != pi) {
                 let ptext_all = text.get(unit.paragraph_text.clone()).unwrap_or("");
                 // Scripts the loaded fonts may lack (Arabic, Japanese, …): a host serving a font
@@ -423,659 +385,102 @@ impl Layouter {
                 crate::served::request_for_text(ptext_all);
                 let fallback = fonts.fallback_stack().map(str::to_string).collect();
                 let split = !(unit.first && unit.last);
-                let rtl = if split && ps.direction == TextDirection::Auto { first_strong_rtl(ptext_all) } else { None };
+                let rtl = if split && ps.direction == photocraft_doc::text::TextDirection::Auto { first_strong_rtl(ptext_all) } else { None };
                 para_cache = Some((pi, fallback, rtl));
             }
             let Some((_, fallback, para_rtl)) = para_cache.as_ref() else { continue };
-            // The runs that can touch this unit: from the one at its start to the last starting
-            // before its end.
-            let first_run = style_at(prange.start);
-            let unit_runs = first_run..run_starts.partition_point(|&s| s < content_end).max(first_run + 1).min(runs.len());
-            // This unit's style for each run: its own, or for a solved line not at scale 1, a copy
-            // at that line's scale (appended to `out.styles`, so render reads the scaled baseline
-            // shift). Only runs the unit touches are copied; `unit_style[i]` is run `first_run + i`.
-            let mut unit_style: Vec<usize> = Vec::new();
-            if unit.scale != 1.0 {
-                for ri in unit_runs.clone() {
-                    let (rs, re) = (run_starts[ri], run_starts[ri] + runs[ri].len);
-                    let touches = ri == first_run || (rs < content_end && re > prange.start);
-                    unit_style.push(if touches {
-                        let scaled = scaled_style(&out.styles[ri], unit.scale);
-                        out.styles.push(scaled);
-                        out.styles.len() - 1
-                    } else {
-                        ri
-                    });
-                }
-            }
-            let sst = |ri: usize| ri.checked_sub(first_run).and_then(|i| unit_style.get(i)).copied().unwrap_or(ri);
-            let content = &text[prange.start..content_end];
-            let prefix = match ps.direction {
-                // A paragraph split into solved lines keeps the direction of its first strong
-                // character: parley would otherwise detect it again on each line.
-                TextDirection::Auto => match para_rtl {
-                    Some(true) => RLM,
-                    Some(false) => LRM,
-                    None => "",
-                },
-                TextDirection::Ltr => LRM,
-                TextDirection::Rtl => RLM,
-            };
-            let mut ptext = String::with_capacity(prefix.len() + content.len());
-            ptext.push_str(prefix);
-            // Ranges in `ptext` for lowercase characters rendered as synthetic small caps.
-            // They have the same UTF-8 length as their uppercase form, so the layer's byte-based
-            // run and caret offsets remain unchanged.
-            let mut synthetic_small_caps: Vec<(Range<usize>, f32)> = Vec::new();
-            // Offsets in `ptext` of the spaces standing in for tabs.
-            let mut tabs: Vec<usize> = Vec::new();
-            let tab_px = DEFAULT_TAB_STOP_PT * k;
-            for (i, ch) in content.char_indices() {
-                // A forced line break ends the line but not the paragraph. The line breaker knows
-                // it as a newline, which has the same length, so text offsets don't move.
-                if ch == FORCED_LINE_BREAK {
-                    ptext.push('\n');
-                    continue;
-                }
-                // Imported PSD text can contain literal tab controls. Font shaping may
-                // render those as .notdef boxes; a space preserves the one-byte source
-                // and style/caret offsets while supplying a real whitespace advance. The space
-                // is widened to its tab stop after line breaking (`tab_px` below).
-                if ch == '\t' {
-                    tabs.push(ptext.len());
-                    ptext.push(' ');
-                    continue;
-                }
-                let style = &out.styles[sst(style_at(prange.start + i))];
-                let caps = style.caps;
-                if caps == Caps::AllCaps || small_caps[style_at(prange.start + i)] == SmallCapsMode::Synthetic {
-                    let up: String = ch.to_uppercase().collect();
-                    if up.len() == ch.len_utf8() {
-                        ptext.push_str(&up);
-                        if caps == Caps::SmallCaps && ch.is_lowercase() {
-                            let end = ptext.len();
-                            synthetic_small_caps.push((end - up.len()..end, style.size_pt * k * SYNTHETIC_SMALL_CAPS_SCALE));
-                        }
-                        continue;
-                    }
-                }
-                ptext.push(ch);
-            }
-            let first_style = &out.styles[sst(style_at(prange.start))];
-            let first_px = first_style.size_pt * k;
-            // The runs that can touch this unit, as `unit_runs`: the one at its start to the last
-            // starting before its end (never one of the scaled copies appended above).
-            let (si0, si_end) = (unit_runs.start, unit_runs.end);
-            // Shapes the paragraph, each tab widened by its letter spacing in `tab_spacing` (px)
-            // and each space in `word_spacing` (range in `ptext`, px) by its word spacing.
-            let build = |lcx: &mut LayoutContext<RunBrush>,
-                         fcx: &mut parley::FontContext,
-                         tab_spacing: &[f32],
-                         word_spacing: &[(Range<usize>, f32)]|
-             -> Layout<RunBrush> {
-                let mut b = lcx.ranged_builder(fcx, &ptext, 1.0, false);
-                // Paragraph-start style as the default (covers the direction mark and empty
-                // paragraphs), then every run piece intersecting this paragraph.
-                let ui0 = sst(si0);
-                for p in style_props(&out.styles[ui0], k, fallback, ui0 as u32, small_caps[si0]) {
-                    b.push_default(p);
-                }
-                // A solved line is already broken: it never wraps, even when wider than the box.
-                // Other paragraph text breaks a word wider than the box at the box edge, as
-                // Photoshop does (#6694): parley's default only breaks at UAX #14 opportunities and
-                // lets the word run out of the box. Point text has no width to overflow.
-                if solved {
-                    b.push_default(StyleProperty::TextWrapMode(TextWrapMode::NoWrap));
-                } else if is_box {
-                    b.push_default(StyleProperty::OverflowWrap(parley::style::OverflowWrap::BreakWord));
-                }
-                for ri in unit_runs.clone() {
-                    let ui = sst(ri);
-                    let st = &out.styles[ui];
-                    let rs = run_starts[ri];
-                    let (a, z) = (rs.max(prange.start), (rs + runs[ri].len).min(content_end));
-                    if a >= z {
-                        continue;
-                    }
-                    let range = (a - prange.start + prefix.len())..(z - prange.start + prefix.len());
-                    for p in style_props(st, k, fallback, ui as u32, small_caps[ri]) {
-                        b.push(p, range.clone());
-                    }
-                    if vertical {
-                        // Upright pieces get the vertical alternates and their class in the brush.
-                        let piece = ptext.get(range.clone()).unwrap_or("");
-                        let mut seg: Option<(usize, VClass)> = None;
-                        let flush = |b: &mut parley::RangedBuilder<'_, RunBrush>, from: usize, to: usize, cls: VClass| {
-                            if cls == VClass::Rotate || from >= to {
-                                return;
-                            }
-                            let mut feats = feature_list(st, small_caps[ri]);
-                            feats.push("\"vert\" 1".into());
-                            let r = (range.start + from)..(range.start + to);
-                            b.push(StyleProperty::FontFeatures(FontFeatures::Source(Cow::Owned(feats.join(", ")))), r.clone());
-                            b.push(StyleProperty::Brush(RunBrush(ui as u32, cls as u8)), r);
-                        };
-                        for (i, ch) in piece.char_indices() {
-                            let cls = vertical_class(ch);
-                            match seg {
-                                Some((_, c)) if c == cls => {}
-                                Some((from, c)) => {
-                                    flush(&mut b, from, i, c);
-                                    seg = Some((i, cls));
-                                }
-                                None => seg = Some((i, cls)),
-                            }
-                        }
-                        if let Some((from, c)) = seg {
-                            flush(&mut b, from, piece.len(), c);
-                        }
-                    }
-                }
-                for (range, size) in &synthetic_small_caps {
-                    b.push(StyleProperty::FontSize(*size), range.clone());
-                }
-                // Korean breaks lines at spaces, between words, as Photoshop sets it; Unicode's
-                // default rules break between any two Hangul syllables, mid-word (#5959).
-                for range in hangul_runs(&ptext) {
-                    b.push(StyleProperty::WordBreak(parley::WordBreak::KeepAll), range);
-                }
-                for (&at, &spacing) in tabs.iter().zip(tab_spacing) {
-                    b.push(StyleProperty::LetterSpacing(spacing), at..at + 1);
-                }
-                // Parley widens each space (U+0020 and no-break space) by the word spacing.
-                for (range, spacing) in word_spacing {
-                    b.push(StyleProperty::WordSpacing(*spacing), range.clone());
-                }
-                b.build(&ptext)
-            };
-            let indent_start = ps.start_indent_pt * k;
-            let indent_end = ps.end_indent_pt * k;
-            // Only a paragraph's first line takes the first-line indent.
-            let first_indent = if unit.first { ps.first_line_indent_pt * k } else { 0.0 };
-            // Box extent along the lines: width, or height for vertical type (columns).
-            let (line_origin, line_len) = if vertical { (box_rect.1, box_rect.3) } else { (box_rect.0, box_rect.2) };
-            let avail = if is_box { Some((line_len - indent_start - indent_end).max(1.0)) } else { None };
-            // Horizontal scale is applied after shaping, so paragraph text breaks at the box
-            // (or area span) width divided by it (#5565). Mixed scales break at the largest, so
-            // no line overflows the box.
-            let break_scale = if wraps {
-                (si0..si_end)
-                    .filter(|&ri| {
-                        let rs = run_starts.get(ri).copied().unwrap_or(0);
-                        let end = rs.saturating_add(runs.get(ri).map_or(0, |r| r.len));
-                        ri == si0 || (rs.max(prange.start) < end.min(content_end))
-                    })
-                    .filter_map(|ri| out.styles.get(ri))
-                    .map(effective_horizontal_scale)
-                    .fold(0.0f32, f32::max)
-            } else {
-                1.0
-            };
-            let break_scale = if break_scale > 0.0 { break_scale } else { 1.0 };
-            // Area type: the first row goes no higher than one leading (plus paragraph spacing)
-            // below the previous paragraph's last line.
-            let space_before = if prev_baseline.is_some() && unit.first { ps.space_before_pt * k } else { 0.0 };
-            let area_from = |m: LineMetrics| match (&area, prev_baseline) {
-                // A solved line stacks as in a box: the previous line's descent, its own ascent
-                // and the gap, a percentage of the larger of the two sizes.
-                (Some(_), Some(b)) if solved => {
-                    let (prev_descent, prev_px) = prev_line.unwrap_or((m.descent, m.px));
-                    b + prev_descent + m.ascent + line_gap.unwrap_or(0.0) / 100.0 * prev_px.max(m.px) + pending_space + space_before
-                }
-                (Some(_), Some(b)) => b + m.leading + pending_space + space_before,
-                (Some(a), None) => a.bounds[1] + m.ascent,
-                (None, _) => 0.0,
-            };
-            // Line-breaking passes left for this paragraph's area type (see `break_area`).
-            let area_budget = std::cell::Cell::new(MAX_AREA_PASSES);
-            let break_lines = |layout: &mut Layout<RunBrush>| -> (Vec<Slot>, bool) {
-                if first_indent != 0.0 {
-                    layout.set_text_indent(first_indent / break_scale, IndentOptions::default());
-                }
-                let Some(a) = &area else {
-                    layout.break_all_lines(avail.map(|a| a / break_scale));
-                    return (Vec::new(), false);
-                };
-                // Plan every row with the paragraph's real line metrics (its tallest font and
-                // largest leading, measured on the unwrapped paragraph), so no wrapped line comes
-                // out taller than the row it was planned in and no second plan is needed.
-                layout.break_all_lines(None);
-                let m = area_metrics(layout, &out.styles, &ps, k, first_style, vertical, line_gap);
-                if solved {
-                    let first = prev_baseline.is_none().then_some(first_px);
-                    return place_solved_area(layout, a, area_from(m), m, first, (indent_start, indent_end), first_indent, break_scale);
-                }
-                break_area(layout, a, area_from(m), m, (indent_start, indent_end), first_px, break_scale, &area_budget)
-            };
-            // Paragraph text: a tab is never wider than a space plus one tab interval, so breaking
-            // lines at that width keeps the expanded tabs inside the box, but can wrap early.
-            // Break again with the tab widths that layout gives until they agree; if they don't
-            // settle, keep the safe layout.
-            let wide = if wraps { tab_px } else { 0.0 };
-            // Dynamic Text's word gap is a percent of each space's own width (-100 % removes it,
-            // +100 % doubles it): shape once without it to read every space's advance.
-            let word_spacing: Vec<(Range<usize>, f32)> = match gaps {
-                Some((word_gap, _)) if word_gap != 0.0 => {
-                    let mut plain = build(&mut self.lcx, &mut fonts.fcx, &vec![wide; tabs.len()], &[]);
-                    plain.break_all_lines(None);
-                    space_advances(&plain, &ptext, &tabs).into_iter().map(|(r, adv)| (r, word_gap / 100.0 * adv)).collect()
-                }
-                _ => Vec::new(),
-            };
-            let mut layout = build(&mut self.lcx, &mut fonts.fcx, &vec![wide; tabs.len()], &word_spacing);
-            let (mut area_slots, mut area_full) = break_lines(&mut layout);
-            if wraps && !tabs.is_empty() {
-                let first = tab_widths(&layout, &tabs, &out.styles, indent_start, first_indent, tab_px);
-                let mut want: Vec<f32> = first.iter().map(|t| t.width).collect();
-                for _ in 0..4 {
-                    let spacing: Vec<f32> = first.iter().zip(&want).map(|(t, w)| w / t.scale - (t.advance - tab_px)).collect();
-                    let mut next = build(&mut self.lcx, &mut fonts.fcx, &spacing, &word_spacing);
-                    let (next_slots, next_full) = break_lines(&mut next);
-                    let got: Vec<f32> = tab_widths(&next, &tabs, &out.styles, indent_start, first_indent, tab_px).iter().map(|t| t.width).collect();
-                    if got.iter().zip(&want).all(|(a, b)| (a - b).abs() < 0.01) {
-                        layout = next;
-                        area_slots = next_slots;
-                        area_full = next_full;
-                        break;
-                    }
-                    want = got;
-                }
-            }
-            let alignment = if wraps {
-                match ps.align {
-                    TextAlign::Left => Alignment::Left,
-                    TextAlign::Center => Alignment::Center,
-                    TextAlign::Right => Alignment::Right,
-                    _ => Alignment::Justify,
-                }
-            } else {
-                Alignment::Left
-            };
-            layout.align(alignment, AlignmentOptions { align_when_overflowing: !wraps });
-
-            // Stack lines.
-            if prev_baseline.is_some() && unit.first {
-                pending_space += ps.space_before_pt * k;
-            }
-            let nlines = layout.len();
-            let map = |o: usize| (prange.start + o.saturating_sub(prefix.len())).min(content_end);
-            // End of the text this paragraph has shown so far.
-            let mut shown_end = prange.start;
-            for (li, line) in layout.lines().enumerate() {
-                // Area type: the slot the breaker gave this line.
-                let slot = area_slots.get(li).copied();
-                if area.is_some() && slot.is_none() {
-                    let h = hides_text(map(line.text_range().start));
-                    out.hidden |= h;
-                    out.overflowed |= h;
-                    stop = true;
-                    break;
-                }
-                let m = *line.metrics();
-                let LineMetrics { ascent, descent, leading, px } = line_metrics(&line, &out.styles, &ps, k, first_style, vertical, line_gap);
-                // Dynamic Text box lines (solved): the previous line's descent, this line's
-                // ascent and the gap, a percentage of the larger of the two sizes. Photoshop's 0%
-                // Line Gap is tight but never collides.
-                let leading = match (solved, line_gap, prev_line) {
-                    (true, Some(gap), Some((prev_descent, prev_px))) => prev_descent + ascent + gap / 100.0 * prev_px.max(px),
-                    _ => leading,
-                };
-                let baseline = match (slot, prev_baseline) {
-                    (Some(s), _) => s.baseline,
-                    // The first column's right edge touches the box's right edge.
-                    // (In vertical type the ascent is half the column width.)
-                    (None, None) if is_box && vertical => -(box_rect.0 + box_rect.2) + ascent,
-                    // Photoshop's "first baseline: ascent": the top of the tallest ascender
-                    // (height of 'd') touches the box top, not the font's hhea ascent.
-                    (None, None) if is_box => box_rect.1 + first_ascent(&line).unwrap_or(ascent),
-                    (None, None) => 0.0,
-                    (None, Some(b)) => b + leading + pending_space,
-                };
-                pending_space = 0.0;
-                // Photoshop keeps a horizontal line whose baseline is inside the box and lets
-                // its descenders hang below the bottom edge (#1317: three 35 pt lines in a
-                // 91.3 pt box, the last baseline at 88). Requiring the descent to fit dropped
-                // that line.
-                let overflow = if vertical { baseline + descent > -box_rect.0 + 0.5 } else { baseline > box_rect.1 + box_rect.3 + 0.5 };
-                if is_box && overflow {
-                    let h = hides_text(map(line.text_range().start));
-                    out.hidden |= h;
-                    out.overflowed |= h;
-                    stop = true;
-                    break;
-                }
-                prev_baseline = Some(baseline);
-                prev_line = Some((descent, px));
-                let last_line = li + 1 == nlines;
-                let adv = m.advance - m.trailing_whitespace;
-
-                // Kerning after each cluster (px), per run in visual cluster order: manual
-                // kerning plus optical pair kerning. Applied after shaping (like horizontal
-                // scale) in line space, so it moves the following glyphs, carets and the line
-                // extent; in vertical type that is along the column. Optical kerning measures
-                // horizontal outlines, so it applies to rotated (Latin) glyphs only there.
-                let mut slots: Vec<KernSlot> = Vec::new();
-                let mut line_runs: Vec<usize> = Vec::new();
-                for item in line.items() {
-                    let PositionedLayoutItem::GlyphRun(gr) = item else {
-                        continue;
-                    };
-                    let run = gr.run();
-                    if line_runs.contains(&run.index()) {
-                        continue;
-                    }
-                    line_runs.push(run.index());
-                    let hs = out.styles.get(gr.style().brush.0 as usize).map_or(1.0, |st| if st.horizontal_scale > 0.0 { st.horizontal_scale } else { 1.0 });
-                    for c in run.visual_clusters() {
-                        let mut gl = c.glyphs();
-                        let first = gl.next().map(|g| g.id);
-                        let last = gl.last().map(|g| g.id).or(first);
-                        slots.push(KernSlot {
-                            run: run.index(),
-                            start: c.text_range().start,
-                            first,
-                            last,
-                            font: run.font().clone(),
-                            coords: run.normalized_coords().to_vec(),
-                            size: run.font_size(),
-                            rtl: c.is_rtl(),
-                            blank: first.is_none() || c.is_space_or_nbsp() || c.text_range().end <= prefix.len(),
-                            upright: vertical && c.first_style().brush.1 != VClass::Rotate as u8,
-                            advance: c.advance() * hs,
-                            growth: c.advance() * (hs - 1.0),
-                            tab: tabs.binary_search(&c.text_range().start).is_ok(),
-                        });
-                    }
-                }
-                let mut kern_px: Vec<f32> = vec![0.0; slots.len()];
-                for j in 0..slots.len().saturating_sub(1) {
-                    let (a, b) = (&slots[j], &slots[j + 1]);
-                    if a.start < prefix.len() {
-                        continue;
-                    }
-                    let st = &out.styles[sst(style_at(map(a.start)))];
-                    let next = &out.styles[sst(style_at(map(b.start)))];
-                    let mut units = if st.kern.is_finite() { st.kern } else { 0.0 };
-                    // Optical pairs: both characters optical (a mode change splits shaping
-                    // runs, which ends automatic kerning, as with Metrics).
-                    if st.kerning == Kerning::Optical
-                        && next.kerning == Kerning::Optical
-                        && st.kern == 0.0
-                        && next.kern == 0.0
-                        && !a.rtl
-                        && !b.rtl
-                        && !a.blank
-                        && !b.blank
-                        && !a.upright
-                        && !b.upright
-                        && a.font.data.id() == b.font.data.id()
-                        && a.font.index == b.font.index
-                        && a.coords == b.coords
-                        && (a.size - b.size).abs() < 1e-3
-                        && let (Some(l), Some(r)) = (a.last, b.first)
-                    {
-                        let coords: Vec<skrifa::instance::NormalizedCoord> =
-                            a.coords.iter().map(|&c| skrifa::instance::NormalizedCoord::from_bits(c)).collect();
-                        if let Some(k) = self.optical.pair(a.font.data.id(), a.font.data.as_ref(), a.font.index, &coords, l, r) {
-                            units += k + crate::optical::size_adjust(st.size_pt);
-                        }
-                    }
-                    kern_px[j] = units / 1000.0 * a.size;
-                }
-                // Tabs: the "kerning" after a tab takes the pen to the next stop, measured from
-                // the anchor or the box edge as if the line were left-aligned (alignment then
-                // moves the whole line).
-                let mut pos = indent_start + if li == 0 { first_indent } else { 0.0 };
-                let mut trailing_tabs = 0.0f32;
-                let mut trailing_growth = 0.0f32;
-                for (j, s) in slots.iter().enumerate() {
-                    // Trailing whitespace is outside the line's extent (`adv`).
-                    let trailing = s.blank && slots[j + 1..].iter().all(|n| n.blank);
-                    if trailing {
-                        trailing_growth += s.growth;
-                    }
-                    if s.tab {
-                        kern_px[j] = next_tab_stop(pos, tab_px) - pos - s.advance;
-                        if slots[j + 1..].iter().all(|n| n.blank) {
-                            trailing_tabs += kern_px[j];
-                        }
-                    }
-                    pos += s.advance + kern_px.get(j).copied().unwrap_or(0.0);
-                }
-                let line_kern: f32 = kern_px.iter().sum::<f32>() - trailing_tabs;
-                // Per run on the line: (run index, glyph → slot, glyphs emitted, first slot whose
-                // kerning isn't applied yet).
-                let mut cursors: Vec<(usize, Vec<usize>, usize, usize)> = Vec::new();
-                for item in line.items() {
-                    let PositionedLayoutItem::GlyphRun(gr) = item else {
-                        continue;
-                    };
-                    let run = gr.run();
-                    if cursors.iter().any(|c| c.0 == run.index()) {
-                        continue;
-                    }
-                    let base = slots.iter().position(|s| s.run == run.index()).unwrap_or(0);
-                    let mut g2s = Vec::new();
-                    for (ci, c) in run.visual_clusters().enumerate() {
-                        g2s.extend(c.glyphs().map(|_| base + ci));
-                    }
-                    cursors.push((run.index(), g2s, 0, base));
-                }
-                // Parley aligned box lines without the kerning.
-                let kern_align = if wraps {
-                    match ps.align {
-                        TextAlign::Center => line_kern / 2.0,
-                        TextAlign::Right => line_kern,
-                        _ => 0.0,
-                    }
-                } else {
-                    0.0
-                };
-                // Box and area lines start at their box or span edge; the line's own width
-                // (`line_avail`) takes the justify-last-line slack.
-                let line_avail = slot.map(|s| s.width).or(avail);
-                let dx = if wraps {
-                    let origin = slot.map_or(line_origin, |s| s.x);
-                    let base = origin + indent_start - kern_align;
-                    let slack = line_avail.unwrap_or(0.0) - adv * break_scale - line_kern;
-                    // Parley aligned the unscaled line in `avail / break_scale`: scale its
-                    // indent and alignment offset back to the box.
-                    let scaled_offset = m.offset * (break_scale - 1.0);
-                    base + if last_line {
-                        match ps.align {
-                            TextAlign::JustifyCenter => slack * 0.5 - m.offset,
-                            TextAlign::JustifyRight => slack - m.offset,
-                            _ => scaled_offset,
-                        }
-                    } else {
-                        scaled_offset
-                    }
-                } else {
-                    let target = match ps.align {
-                        TextAlign::Center | TextAlign::JustifyCenter => -(adv + line_kern) / 2.0,
-                        TextAlign::Right | TextAlign::JustifyRight => -(adv + line_kern),
-                        _ => indent_start,
-                    };
-                    target - m.offset
-                };
-                let justify_all = wraps && last_line && ps.align == TextAlign::JustifyAll;
-                let line_index = out.lines.len();
-                let lr = line.text_range();
-                let g0 = out.glyphs.len();
-                let c0 = out.clusters.len();
-                let mut vinfo: Vec<VGlyph> = Vec::new();
-                let mut extra = 0.0f32; // horizontal-scale growth and kerning along the line
-                let mut seen_runs: Vec<usize> = Vec::new();
-                for item in line.items() {
-                    let PositionedLayoutItem::GlyphRun(gr) = item else {
-                        continue;
-                    };
-                    let run = gr.run();
-                    let si = gr.style().brush.0;
-                    let st = &out.styles[si as usize];
-                    let hs = if st.horizontal_scale > 0.0 { st.horizontal_scale } else { 1.0 };
-                    let synth = run.synthesis();
-                    let face = out.faces.len() as u32;
-                    out.faces.push(GlyphFace {
-                        font: run.font().clone(),
-                        coords: run.normalized_coords().to_vec(),
-                        size_px: run.font_size(),
-                        embolden: synthetic_bold(synth.embolden(), st.weight, run.font_attrs().weight.value()),
-                        skew_deg: synth.skew().unwrap_or(0.0),
-                    });
-                    let run_x0 = dx + gr.offset() + extra;
-                    if !seen_runs.contains(&run.index()) {
-                        seen_runs.push(run.index());
-                        let mut cx = run_x0;
-                        let base = slots.iter().position(|s| s.run == run.index()).unwrap_or(0);
-                        for (ci, c) in run.visual_clusters().enumerate() {
-                            let a = c.advance() * hs + kern_px.get(base + ci).copied().unwrap_or(0.0);
-                            let r = c.text_range();
-                            if r.end > prefix.len() || prefix.is_empty() {
-                                out.clusters.push(ClusterInfo { range: map(r.start)..map(r.end), x: cx, advance: a, line: line_index, rtl: c.is_rtl() });
-                            }
-                            cx += a;
-                        }
-                    }
-                    let rm = run.metrics();
-                    let vm = if vertical { Some(VMetrics::new(run.font(), run.normalized_coords(), run.font_size())) } else { None };
-                    let class = gr.style().brush.1;
-                    // Glyphs of the run's own characters (not substituted by `vert`).
-                    let plain: Vec<u32> = match (&vm, class) {
-                        (Some(v), 2) => ptext.get(run.text_range()).unwrap_or("").chars().filter_map(|c| v.cmap(c)).collect(),
-                        _ => Vec::new(),
-                    };
-                    let mut pen = gr.offset();
-                    let mut cursor = cursors.iter_mut().find(|c| c.0 == run.index());
-                    for g in gr.glyphs() {
-                        // Kerning of the clusters before this glyph's cluster.
-                        if let Some(c) = cursor.as_deref_mut() {
-                            if let Some(&slot) = c.1.get(c.2) {
-                                while c.3 < slot {
-                                    extra += kern_px.get(c.3).copied().unwrap_or(0.0);
-                                    c.3 += 1;
-                                }
-                            }
-                            c.2 += 1;
-                        }
-                        out.glyphs.push(PlacedGlyph {
-                            face,
-                            id: g.id,
-                            x: dx + pen + g.x + extra,
-                            y: baseline + g.y,
-                            style: si,
-                            orient: GlyphOrient::Horizontal,
-                        });
-                        if let Some(v) = &vm {
-                            let upright = class == 1 || (class == 2 && !plain.contains(&g.id));
-                            vinfo.push(VGlyph {
-                                upright,
-                                advance: g.advance * hs,
-                                origin: if upright { v.origin(g.id) } else { 0.0 },
-                                // Rotated text is centred on the column: its baseline sits
-                                // (ascent − descent) / 2 from the centre line.
-                                centre: (rm.ascent - rm.descent) * 0.5,
-                            });
-                        }
-                        extra += g.advance * (hs - 1.0);
-                        pen += g.advance;
-                    }
-                    // The run's last glyph: its remaining clusters' kerning follows it.
-                    if let Some(c) = cursor
-                        && c.2 >= c.1.len()
-                    {
-                        let end = slots.iter().rposition(|s| s.run == c.0).map_or(c.3, |p| p + 1);
-                        while c.3 < end {
-                            extra += kern_px.get(c.3).copied().unwrap_or(0.0);
-                            c.3 += 1;
-                        }
-                    }
-                    let run_x1 = dx + gr.offset() + gr.advance() + extra;
-                    let shift = st.baseline_shift_pt * k;
-                    if vertical {
-                        // Underline to the right of the column, strikethrough through its centre
-                        // (stored directly in text space).
-                        let half = run.font_size() * 0.5;
-                        let mut push = |v0: f32, v1: f32| out.decorations.push(DecorationRect { x0: -v1, y0: run_x0, x1: -v0, y1: run_x1, style: si });
-                        if gr.style().underline.is_some() {
-                            let v1 = baseline - half;
-                            push(v1 - rm.underline_size.max(1.0), v1);
-                        }
-                        if gr.style().strikethrough.is_some() {
-                            let sz = rm.strikethrough_size.max(1.0);
-                            push(baseline - sz * 0.5, baseline + sz * 0.5);
-                        }
-                    } else if gr.style().underline.is_some() {
-                        let y0 = baseline - rm.underline_offset - shift;
-                        out.decorations.push(DecorationRect { x0: run_x0, y0, x1: run_x1, y1: y0 + rm.underline_size.max(1.0), style: si });
-                    }
-                    if !vertical && gr.style().strikethrough.is_some() {
-                        let y0 = baseline - rm.strikethrough_offset - shift;
-                        out.decorations.push(DecorationRect { x0: run_x0, y0, x1: run_x1, y1: y0 + rm.strikethrough_size.max(1.0), style: si });
-                    }
-                }
-                if vertical {
-                    extra -= squeeze_punctuation(text, &mut out.clusters[c0..], &mut out.glyphs[g0..]);
-                }
-                if justify_all {
-                    let slack = line_avail.unwrap_or(0.0) - (adv + extra);
-                    let n = out.clusters.len() - c0;
-                    if n > 1 && slack > 0.0 {
-                        let step = slack / (n - 1) as f32;
-                        let starts: Vec<f32> = out.clusters[c0..].iter().map(|c| c.x).collect();
-                        for (i, c) in out.clusters[c0..].iter_mut().enumerate() {
-                            c.x += step * i as f32;
-                        }
-                        for g in &mut out.glyphs[g0..] {
-                            let i = starts.iter().rposition(|&s| s <= g.x + 1e-3).unwrap_or(0);
-                            g.x += step * i as f32;
-                        }
-                        extra += slack;
-                    }
-                }
-                if vertical {
-                    // Line space → text space (90° clockwise); upright glyphs centred on the column.
-                    for (g, v) in out.glyphs[g0..].iter_mut().zip(&vinfo) {
-                        let (u, cross) = (g.x, g.y);
-                        if v.upright {
-                            g.x = -baseline - v.advance * 0.5;
-                            g.y = u + v.origin;
-                            g.orient = GlyphOrient::Upright;
-                        } else {
-                            g.x = -(cross + v.centre);
-                            g.y = u;
-                            g.orient = GlyphOrient::Rotated;
-                        }
-                    }
-                }
-                let x0 = dx + m.offset;
-                let x1 = x0 + adv + extra - trailing_tabs - trailing_growth;
-                // A word too long to wrap: parley's own line advance (before horizontal scale and
-                // kerning, which it doesn't see) is wider than the width it broke the line at,
-                // which on a paragraph's first line has the first-line indent taken off. A solved
-                // Dynamic Text line was sized by its visible width, so that is what counts.
-                let measured = if solved { x1 - x0 } else { adv * break_scale };
-                if let Some(w) = line_avail
-                    && measured > w - if li == 0 { first_indent } else { 0.0 } + 0.5
-                {
-                    out.overflowed = true;
-                }
-                shown_end = shown_end.max(map(lr.end));
-                out.lines.push(LineInfo { range: map(lr.start)..map(lr.end).min(content_end), baseline, x0, x1, ascent, descent, paragraph: pi });
-            }
-            if area_full {
-                // The shape is full: the rest of this paragraph and later ones are hidden.
-                let h = hides_text(shown_end);
-                out.hidden |= h;
-                out.overflowed |= h;
-                stop = true;
-            }
-            if unit.last {
-                pending_space += ps.space_after_pt * k;
-            }
+            let para = Para::new(&env, shaping::UnitInput { unit, unit_style, fallback: fallback.clone(), para_rtl: *para_rtl }, ps);
+            self.layout_paragraph(fonts, &mut out, &mut flow, para);
         }
+        out.styles = styles;
         out
     }
+
+    /// Breaks one paragraph (or solved Dynamic Text line) and stacks its lines below the previous one's.
+    fn layout_paragraph(&mut self, fonts: &mut FontDb, out: &mut TextLayout, flow: &mut Flow, para: Para<'_>) {
+        let env = para.env;
+        // Whether hiding the text from `from` on hides anything but line and paragraph breaks
+        // (an empty last paragraph below the box is not overflow).
+        let hides_text = |from: usize| env.text.get(from..).is_none_or(|r| r.chars().any(|c| !matches!(c, '\r' | '\n' | FORCED_LINE_BREAK)));
+        let hide = |out: &mut TextLayout, from: usize| {
+            let h = hides_text(from);
+            out.hidden |= h;
+            out.overflowed |= h;
+        };
+        let (mut layout, area_slots, area_full) = para.break_paragraph(&mut self.lcx, &mut fonts.fcx, flow);
+        layout.align(para.alignment(), para.align_options());
+        if flow.prev_baseline.is_some() && para.first {
+            flow.pending_space += para.ps.space_before_pt * env.k;
+        }
+        let nlines = layout.len();
+        // End of the text this paragraph has shown so far.
+        let mut shown_end = para.start;
+        for (li, line) in layout.lines().enumerate() {
+            // Area type: the slot the breaker gave this line.
+            let slot = area_slots.get(li).copied();
+            if env.area.is_some() && slot.is_none() {
+                hide(out, para.map_offset(line.text_range().start));
+                flow.stop = true;
+                break;
+            }
+            let Some(frame) = para.frame_line(&line, li, nlines, slot, flow) else {
+                hide(out, para.map_offset(line.text_range().start));
+                flow.stop = true;
+                break;
+            };
+            para.place_line(&mut self.optical, out, &line, &frame);
+            shown_end = shown_end.max(para.map_offset(line.text_range().end));
+        }
+        if area_full {
+            // The shape is full: the rest of this paragraph and later ones are hidden.
+            hide(out, shown_end);
+            flow.stop = true;
+        }
+        if para.last {
+            flow.pending_space += para.ps.space_after_pt * env.k;
+        }
+    }
+}
+
+/// What a layout run shares between its paragraphs.
+struct Env<'a> {
+    text: &'a str,
+    runs: &'a [photocraft_doc::text::TextRun],
+    styles: &'a [CharStyle],
+    /// Start offset of each run.
+    run_starts: &'a [usize],
+    small_caps: &'a [SmallCapsMode],
+    k: f32,
+    vertical: bool,
+    is_box: bool,
+    /// Box and area text wrap, align within their lines and hide what doesn't fit.
+    wraps: bool,
+    box_rect: (f32, f32, f32, f32),
+    area: Option<crate::area::AreaShape>,
+    /// Dynamic Text lines are solved: each unit is one line, laid out without wrapping.
+    solved: bool,
+    /// Dynamic Text's line gap (percent of the font size), replacing the leading.
+    line_gap: Option<f32>,
+    /// Dynamic Text's word gap (percent of each space's own width).
+    word_gap: Option<f32>,
+}
+
+impl Env<'_> {
+    /// Index of the run (and style) containing byte offset `off`.
+    fn style_at(&self, off: usize) -> usize {
+        run_index_at(self.run_starts, off)
+    }
+}
+
+/// Where the previous paragraph left off.
+#[derive(Default)]
+struct Flow {
+    prev_baseline: Option<f32>,
+    /// The previous line's descent and largest size (px): a solved Dynamic Text line is
+    /// stacked from it, so a big line's descenders never reach the smaller line below.
+    prev_line: Option<(f32, f32)>,
+    pending_space: f32,
+    stop: bool,
 }
 
 /// Text laid out as one parley paragraph: a whole paragraph, or with solved Dynamic Text

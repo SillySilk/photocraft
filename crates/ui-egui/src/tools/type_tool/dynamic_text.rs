@@ -2,7 +2,7 @@
 //! the Properties type section.
 
 use super::defaults::{drag_key, target, target_text};
-use super::*;
+use super::{PhotocraftApp, Stroke, json};
 
 /// Whether the target type layer is Dynamic Text (its size comes from the box).
 pub(super) fn is_fitted(app: &PhotocraftApp) -> bool {
