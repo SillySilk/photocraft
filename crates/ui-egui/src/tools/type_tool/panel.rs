@@ -2,7 +2,8 @@ use super::defaults::{apply, apply_defaults, default_styles, formatting_params, 
 use super::dynamic_text::{dynamic_text_gaps, dynamic_text_toggle, is_fitted};
 use super::fonts::{axis_sliders, font_picker, fonts_ready, selected_style, style_label, styles};
 use super::options_bar::{
-    align_glyph, apply_kerning, direction_glyph, direction_items, icon_label, kerning_at, kerning_field, kerning_label, num_field, styles_at, toggle_cell,
+    align_glyph, apply_kerning, direction_glyph, direction_items, icon_label, kerning_at, kerning_field, kerning_label, num_field, shown_family, styles_at,
+    toggle_cell,
 };
 use super::{Color32, LayerId, PhotocraftApp, Stroke, json, text_layer};
 
@@ -230,7 +231,7 @@ fn type_sections(app: &mut PhotocraftApp, ui: &mut egui::Ui, character: bool, pa
     if character && section(ui, "character", tl!("Character")) {
         let full = ui.available_width();
         let w = field_width(full, 2, LABEL_W);
-        let mut fam = c.font_family.clone();
+        let mut fam = shown_family(app, &c);
         let mut ready = true;
         row(ui, &mut |ui| {
             ready = fonts_ready(ui, full);
@@ -251,7 +252,8 @@ fn type_sections(app: &mut PhotocraftApp, ui: &mut egui::Ui, character: bool, pa
                 return;
             }
             let mut style = selected_style(&c);
-            let opts: Vec<(String, String)> = styles(&fam).into_iter().map(|s| (s.clone(), style_label(&s))).collect();
+            let opts: Vec<(String, String)> =
+                styles(if fam.is_empty() { &c.font_family } else { &fam }).into_iter().map(|s| (s.clone(), style_label(&s))).collect();
             let opts_ref: Vec<(String, &str)> = opts.iter().map(|(a, b)| (a.clone(), b.as_str())).collect();
             if crate::widgets::dropdown(ui, "props-type-style", tl!("Style"), &mut style, &opts_ref, full) {
                 apply(app, ui.ctx(), json!({"fontStyle": style}));
