@@ -388,7 +388,7 @@ impl Layouter {
                 break;
             }
             let pi = unit.paragraph;
-            let ps = paras[para_starts.iter().rposition(|&s| s <= unit.range.start).unwrap_or(0)].style.clone();
+            let ps = paras[run_index_at(&para_starts, unit.range.start)].style.clone();
             if para_cache.as_ref().is_none_or(|c| c.0 != pi) {
                 let ptext_all = text.get(unit.paragraph_text.clone()).unwrap_or("");
                 // Scripts the loaded fonts may lack (Arabic, Japanese, …): a host serving a font
